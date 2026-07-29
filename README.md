@@ -18,16 +18,26 @@ its assurance tier, not a blanket claim about the agent's safety or behavior.
 
 ## Install
 
-This is an [Agent Skills](https://agentskills.io) package. From a clone of this repo:
+**Fastest — published to npm, no clone needed:**
+
+```bash
+npx viaid-skill
+```
+
+**Via the Agent Skills registry:**
+
+```bash
+npx skills add SathiaAI/viaid
+```
+
+**From a clone of this repo:**
 
 ```bash
 node scripts/install.js
 ```
 
-Auto-detects Claude Code, Codex CLI, Gemini CLI, Cursor, and Windsurf on your machine and
-copies the skill into each one's skills directory. Takes under a second.
-
-Once published, `npx skills add SathiaAI/viaid` will do the same without cloning first.
+All three auto-detect Claude Code, Codex CLI, Gemini CLI, Cursor, and Windsurf on your machine
+and copy the skill into each one's skills directory. Takes under a second.
 
 ## Use
 
