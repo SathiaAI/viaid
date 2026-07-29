@@ -61,6 +61,24 @@ party decides whether to fetch the verify URL or check the badge file directly; 
 decision, and whatever they do with it (gate, log, ignore), is theirs, not this skill's.
 Don't build retry/caching/wrapper logic here — it's two headers.
 
+## Phase 2b — announce yourself in conversation (optional — only for conversational agents)
+
+Phase 2's headers only work system-to-system. If a human is just chatting with the agent,
+there's no HTTP response for them to inspect — use the announce helper instead:
+
+```js
+import { announceLine } from './lib/announce.mjs';
+const line = announceLine(badgePath); // "My VIA ID is <code> — verify at https://viaid.ai/a/<code>."
+```
+
+Wire this into the agent's system prompt (e.g. "if asked about your VIA ID, badge, or
+identity, respond with exactly this line: <announceLine output>") or call it directly when
+answering a question like "what's your VIA ID." **Use the returned string verbatim — don't
+paraphrase it.** A human or downstream tool that wants to find the short code in a reply is
+relying on the exact wording; rewording it defeats the point. This is a small, deliberately
+narrow helper (SAT-926) — it doesn't decide when to announce, doesn't hook any chat
+framework, and doesn't make the agent volunteer its badge unprompted unless you tell it to.
+
 ## Phase 3 — verify before shipping (and periodically after)
 
 ```bash
