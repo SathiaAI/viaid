@@ -1,0 +1,35 @@
+{
+  "name": "viaid-skill",
+  "version": "0.1.0",
+  "description": "Give an AI agent a verifiable identity and a tamper-evident record of what it did. One skill for Claude Code, Codex, Gemini CLI, Cursor, and Copilot.",
+  "bin": {
+    "viaid-skill": "scripts/install.js",
+    "viaid": "bin/viaid.mjs"
+  },
+  "files": [
+    "SKILL.md",
+    "bin/",
+    "src/",
+    "lib/",
+    "scripts/"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/SathiaAI/viaid.git"
+  },
+  "keywords": [
+    "agent-skills",
+    "ai-agents",
+    "agent-identity",
+    "audit-log",
+    "tamper-evident",
+    "claude",
+    "codex",
+    "gemini",
+    "cursor"
+  ],
+  "license": "MIT"
+}

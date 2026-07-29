@@ -1,0 +1,5 @@
+node_modules/
+.keys/
+viaid-work/
+*.log
+.DS_Store
