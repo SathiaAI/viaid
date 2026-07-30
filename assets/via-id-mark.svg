@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 400">
+  <!-- VIA ID mark — production vector, v2. Tick replaces the paperclip-doubled V. -->
+  <!-- Tag: one genuine continuous closed stroke path, no break -->
+  <g transform="translate(200,200)">
+    <g transform="rotate(-35)">
+      <path d="M -110,-55 L -110,55 A 20,20 0 0 0 -90,75 L 90,75 A 20,20 0 0 0 110,55 L 110,-41 L 76,-75 L -90,-75 A 20,20 0 0 0 -110,-55 Z"
+            fill="none" stroke="#FF2079" stroke-width="16" stroke-linejoin="round" stroke-linecap="round"/>
+    </g>
+    <!-- Tick: one genuine continuous open stroke path, two segments, asymmetric
+         (short arm, long arm) — a real checkmark, not a symmetric V. No second
+         path needed: this is a true single unbroken stroke by construction. -->
+    <path d="M -30,-10 L -4,30 L 44,-40"
+          fill="none" stroke="#FF2079" stroke-width="15" stroke-linejoin="round" stroke-linecap="round"/>
+  </g>
+</svg>

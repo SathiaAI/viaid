@@ -1,0 +1,91 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 960 480" role="img" aria-label="How an AgentID works: three keys sign a badge, which carries a hash-chained log of actions.">
+  <rect width="960" height="480" rx="20" fill="#121016"/>
+
+  <text x="480" y="46" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="800" font-size="22" letter-spacing="3" fill="#FF2079">HOW AN AGENTID WORKS</text>
+
+  <!-- Three key boxes -->
+  <g font-family="Arial, Helvetica, sans-serif" fill="#F2EFEA">
+    <!-- Owner/Creator -->
+    <rect x="70" y="76" width="240" height="104" rx="12" fill="none" stroke="#FF2079" stroke-width="3"/>
+    <g transform="translate(190,110)" stroke="#FF2079" stroke-width="5" stroke-linecap="round" fill="none">
+      <circle cx="-34" cy="0" r="11"/>
+      <line x1="-23" y1="0" x2="26" y2="0"/>
+      <line x1="10" y1="0" x2="10" y2="12"/>
+      <line x1="22" y1="0" x2="22" y2="10"/>
+    </g>
+    <text x="190" y="150" text-anchor="middle" font-weight="700" font-size="15" letter-spacing="0.5">OWNER / CREATOR</text>
+    <text x="190" y="168" text-anchor="middle" font-size="12" fill="#B9B3AC">signs at mint</text>
+
+    <!-- Agent -->
+    <rect x="360" y="76" width="240" height="104" rx="12" fill="none" stroke="#FF2079" stroke-width="3"/>
+    <g transform="translate(480,110)" stroke="#FF2079" stroke-width="5" stroke-linecap="round" fill="none">
+      <circle cx="-34" cy="0" r="11"/>
+      <line x1="-23" y1="0" x2="26" y2="0"/>
+      <line x1="10" y1="0" x2="10" y2="12"/>
+      <line x1="22" y1="0" x2="22" y2="10"/>
+    </g>
+    <text x="480" y="150" text-anchor="middle" font-weight="700" font-size="15" letter-spacing="0.5">AGENT KEY</text>
+    <text x="480" y="168" text-anchor="middle" font-size="12" fill="#B9B3AC">signs every log entry</text>
+
+    <!-- Witness -->
+    <rect x="650" y="76" width="240" height="104" rx="12" fill="none" stroke="#FF2079" stroke-width="3"/>
+    <g transform="translate(770,110)" stroke="#FF2079" stroke-width="5" stroke-linecap="round" fill="none">
+      <circle cx="-34" cy="0" r="11"/>
+      <line x1="-23" y1="0" x2="26" y2="0"/>
+      <line x1="10" y1="0" x2="10" y2="12"/>
+      <line x1="22" y1="0" x2="22" y2="10"/>
+    </g>
+    <text x="770" y="150" text-anchor="middle" font-weight="700" font-size="15" letter-spacing="0.5">VIA ID WITNESS</text>
+    <text x="770" y="168" text-anchor="middle" font-size="12" fill="#B9B3AC">neutral co-sign</text>
+  </g>
+
+  <!-- Convergence lines -->
+  <g stroke="#5A5560" stroke-width="2" fill="none">
+    <path d="M190,180 L190,215 Q190,230 205,230 L465,230 Q480,230 480,245"/>
+    <path d="M480,180 L480,245"/>
+    <path d="M770,180 L770,215 Q770,230 755,230 L495,230 Q480,230 480,245"/>
+  </g>
+
+  <!-- Badge (tag + tick, simplified) -->
+  <g transform="translate(480,300)">
+    <g transform="rotate(-18)">
+      <rect x="-70" y="-42" width="140" height="84" rx="16" fill="none" stroke="#FF2079" stroke-width="6"/>
+    </g>
+    <path d="M -22,-6 L -3,16 L 30,-24" fill="none" stroke="#FF2079" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <text x="480" y="358" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="700" font-size="15" fill="#F2EFEA" letter-spacing="0.5">SIGNED AGENTID BADGE</text>
+
+  <!-- Arrow down to the log chain -->
+  <line x1="480" y1="368" x2="480" y2="392" stroke="#5A5560" stroke-width="2"/>
+  <path d="M472,386 L480,398 L488,386" fill="none" stroke="#5A5560" stroke-width="2"/>
+
+  <!-- Hash-chained log -->
+  <g font-family="Arial, Helvetica, sans-serif">
+    <g transform="translate(120,412)">
+      <rect width="130" height="46" rx="8" fill="#1C1922" stroke="#FF2079" stroke-width="2"/>
+      <text x="65" y="29" text-anchor="middle" font-size="12" fill="#F2EFEA" font-weight="700">action 1</text>
+    </g>
+    <line x1="250" y1="435" x2="284" y2="435" stroke="#FF2079" stroke-width="3"/>
+    <g transform="translate(284,412)">
+      <rect width="130" height="46" rx="8" fill="#1C1922" stroke="#FF2079" stroke-width="2"/>
+      <text x="65" y="29" text-anchor="middle" font-size="12" fill="#F2EFEA" font-weight="700">action 2</text>
+    </g>
+    <line x1="414" y1="435" x2="448" y2="435" stroke="#FF2079" stroke-width="3"/>
+    <g transform="translate(448,412)">
+      <rect width="130" height="46" rx="8" fill="#1C1922" stroke="#FF2079" stroke-width="2"/>
+      <text x="65" y="29" text-anchor="middle" font-size="12" fill="#F2EFEA" font-weight="700">action 3</text>
+    </g>
+    <line x1="578" y1="435" x2="612" y2="435" stroke="#FF2079" stroke-width="3"/>
+    <g transform="translate(612,412)">
+      <rect width="130" height="46" rx="8" fill="#1C1922" stroke="#FF2079" stroke-width="2"/>
+      <text x="65" y="29" text-anchor="middle" font-size="12" fill="#F2EFEA" font-weight="700">action 4</text>
+    </g>
+    <line x1="742" y1="435" x2="776" y2="435" stroke="#FF2079" stroke-width="3"/>
+    <g transform="translate(776,412)">
+      <rect width="130" height="46" rx="8" fill="#1C1922" stroke="#FF2079" stroke-width="2"/>
+      <text x="65" y="29" text-anchor="middle" font-size="12" fill="#F2EFEA" font-weight="700">action 5</text>
+    </g>
+  </g>
+
+  <text x="480" y="476" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-size="12" fill="#8A8480">each entry hashes the one before it — verification confirms the chain is intact, or shows exactly where it isn't</text>
+</svg>
