@@ -469,4 +469,563 @@ export function mintBadge({
 // check that a locally-doctored log copy cannot spoof.
 //
 // NOT ported here, flagged rather than silently done or silently skipped: prototype/src/
-// agentid.mjs also carries a second, independent round of har
+// agentid.mjs also carries a second, independent round of hardening (Codex adversarial review,
+// 2026-07-31, fixes #10-15 — isRevoked()'s cache-field fallback, SKIP_DIRS depth-0 scoping,
+// model_set moved out of inception to a top-level signed field, verifyBadgeInner()'s log-array
+// rejection, appendLog()'s reserved-action-name guard) that this file does not yet have. Porting
+// those is a separate, broader sync task across all 3 mirrored copies of agentid.mjs (this one,
+// prototype's, and viaid-web/lib/agentid-core.mjs) — out of scope for "port the WITNESSED
+// wrapper" specifically, so this file is now current on WITNESSED-tier but NOT fully synced
+// with prototype's other hardening.
+//
+// Layered ON TOP of mintBadge() rather than folded into it, so mintBadge() stays 100%
+// synchronous and behavior-identical for every existing SELF-tier caller. Fail-closed: any
+// registration failure throws and returns no badge at all — never a silent SELF-tier fallback.
+const WITNESS_HTTP_TIMEOUT_MS = Number(process.env.VIAID_WITNESS_TIMEOUT_MS || 10000);
+// Single swap point for the production witness service URL — flip only this line (or set
+// VIAID_WITNESS_URL) if the deployed domain changes.
+const WITNESS_SERVICE_URL = process.env.VIAID_WITNESS_URL || 'https://witness.viaid.ai';
+
+// Mirrors viaid-witness's lib/witness.mjs registrationAttestationMessage() byte for byte (same
+// canonical() algorithm, same field set) — the server recomputes and checks this exact message,
+// so any drift here makes owner_sig/voucher_sig fail server-side verification.
+function registrationAttestationMessage(agentId, ownerPub, voucherPub) {
+  return canonical({ purpose: 'witness_registration', agent_id: agentId, owner_pub: ownerPub, voucher_pub: voucherPub });
+}
+
+export async function mintWitnessedBadge(opts) {
+  const witnessServiceUrl = (opts && opts.witnessServiceUrl) || WITNESS_SERVICE_URL;
+
+  // Step 1: mint exactly as SELF-tier, via the existing unchanged path — same inception, same
+  // agent_id derivation, same keystore write. No new failure surface introduced here.
+  const badge = mintBadge(opts);
+  const keys = loadKeys(opts.workRoot, badge.agent_id);
+
+  // Step 2: sign the registration attestation with the REAL owner/voucher private keys — never
+  // agent (matches REVOKE_ROLE_PUB_FIELD's established "agent never self-attests a mutation").
+  const msg = registrationAttestationMessage(badge.agent_id, badge.inception.owner_pub, badge.inception.voucher_pub);
+  const owner_sig = signB64(keys.owner.priv, msg);
+  const voucher_sig = signB64(keys.voucher.priv, msg);
+
+  // Step 3: register with the witness service. Fail-closed — see header comment above.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), WITNESS_HTTP_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(`${witnessServiceUrl}/api/witness-register`, {
+      method: 'POST',
+      signal: ctrl.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ inception: badge.inception, owner_sig, voucher_sig }),
+    });
+  } catch (e) {
+    throw new Error(`WITNESSED mint failed: witness-register request to ${witnessServiceUrl} errored — ${e.message}`);
+  } finally {
+    clearTimeout(timer);
+  }
+  let body = null;
+  try { body = await res.json(); } catch { /* non-JSON error body — fall through with body=null */ }
+  if (!res.ok) {
+    throw new Error(`WITNESSED mint failed: witness-register returned HTTP ${res.status}${body && body.error ? ` — ${body.error}` : ''}`);
+  }
+
+  // Step 4: only NOW claim WITNESSED — re-sign the whole badge core so the tier change itself
+  // is covered by the same whole-badge signature every other field already is.
+  badge.assurance_tier = 'WITNESSED';
+  return resign(badge, keys);
+}
+
+// ---- append a hash-chained log entry (viaid log) ----
+export function appendLog(badge, workRoot, { action, model_used = null, detail = null }) {
+  // Found by adversarial testing 2026-07-30: nothing previously stopped normal activity from
+  // being logged (and whole-badge-resigned!) onto an already-revoked badge, which both makes no
+  // sense (a revoked badge is dead) and is the precondition for a verify-time double-revoke /
+  // revoke-then-activity edge case. Refusing at the source is simpler than reasoning about it
+  // at verify time — see coreAsSignedBeforeRevoke()'s comment for how this keeps the "trailing
+  // run of revoke entries" assumption an enforced invariant, not just a hopeful heuristic.
+  if (isRevoked(badge)) throw new Error('badge has a valid revoke event in its log — refusing to log further activity');
+  const prev_hash = badge.log.length ? badge.log[badge.log.length - 1].entry_hash : 'GENESIS';
+  const body = { seq: badge.log.length, action, model_used, detail, prev_hash };
+  const entry = { ...body, entry_hash: sha256(prev_hash + '\n' + canonical(body)) };
+  badge.log.push(entry);
+  return resign(badge, loadKeys(workRoot, badge.agent_id));
+}
+
+// ---- rotate the agent key (viaid rotate) — KERI-style pre-rotation, D-15 ----
+// reason: free-text ('routine', 'scheduled', ...). Pass compromisedSince (ISO string) to
+// emit a COMPROMISE_ROTATION event instead of a plain ROTATION event.
+export function rotateKey(badge, workRoot, { reason = 'routine', compromisedSince = null } = {}) {
+  if (isRevoked(badge)) throw new Error('badge has a valid revoke event in its log — refusing to rotate a revoked badge');
+  const keys = loadKeys(workRoot, badge.agent_id);
+  const revealedNext = keys.next_agent;
+  if (!revealedNext) throw new Error('no pre-committed next key in the keystore — cannot rotate');
+
+  const priorCommitment = badge.next_key_commitment;
+  if (sha256(revealedNext.pub) !== priorCommitment) {
+    // Keystore/badge got out of sync — refuse rather than mint an unverifiable rotation.
+    throw new Error('pre-committed next key does not match next_key_commitment — rotation aborted');
+  }
+
+  const newNext = genKeypair(); // pre-commit to the FOLLOWING rotation now
+  const isCompromise = !!compromisedSince;
+  const action = isCompromise ? 'COMPROMISE_ROTATION' : 'ROTATION';
+  const seq = badge.log.length;
+  const detail = {
+    prev_key_seq: badge.key_seq,
+    new_key_seq: badge.key_seq + 1,
+    revealed_next_pub: revealedNext.pub,        // fulfills the prior commitment
+    prior_commitment: priorCommitment,
+    new_next_key_commitment: sha256(newNext.pub),
+    reason,
+    ...(isCompromise ? { suspected_since: compromisedSince } : {}),
+  };
+  // Per-event voucher attestation — independent of the whole-badge resign below, so a single
+  // rotation event can be checked/disclosed on its own (D-15's "voucher-witnessed" requirement).
+  // Domain-separated (agent_id/seq/action bound in) — see attestationMessage()'s comment for why.
+  const voucher_attestation = signB64(keys.voucher.priv, attestationMessage(badge.agent_id, seq, action, detail));
+
+  const prev_hash = badge.log.length ? badge.log[badge.log.length - 1].entry_hash : 'GENESIS';
+  const body = { seq, action, model_used: null, detail, voucher_attestation, prev_hash };
+  const entry = { ...body, entry_hash: sha256(prev_hash + '\n' + canonical(body)) };
+  badge.log.push(entry);
+
+  // Advance the live pointers. inception.key_seq/next_key_commitment are left untouched —
+  // they're the frozen genesis snapshot inception hashes into agent_id.
+  badge.keys.agent_pub = revealedNext.pub;
+  badge.key_seq = detail.new_key_seq;
+  badge.next_key_commitment = detail.new_next_key_commitment;
+  badge.last_rotation_reason = reason;
+  badge.last_rotation_at = new Date().toISOString();
+
+  // Rotate the keystore: the old "next" key becomes the current signing key; mint a fresh "next".
+  keys.agent = revealedNext;
+  keys.next_agent = newNext;
+  saveKeys(workRoot, badge.agent_id, keys);
+
+  return resign(badge, keys);
+}
+
+// ---- attach GraphSmith evidence (viaid eval) ----
+export function attachEvidence(badge, workRoot, evidence) {
+  if (isRevoked(badge)) throw new Error('badge has a valid revoke event in its log — refusing to attach evidence to a revoked badge');
+  badge.evidence = evidence; // { engine, status, confirmed_profiles, downgraded_profiles, note, evaluated_at_source }
+  // Evidence raises the assurance the verdict can claim, but only what the evidence supports.
+  return resign(badge, loadKeys(workRoot, badge.agent_id));
+}
+
+// ---- revoke (viaid revoke) — D-24: three independent per-role signed events ----
+// Deliberately NOT routed through the whole-badge resign() — that would require
+// owner+agent+voucher privs together, which defeats the point (revoke must be completable
+// WITHOUT the cooperation of the party being revoked against). Each function below signs
+// only ONE role's key over the event detail (mirroring rotateKey's `voucher_attestation`
+// pattern), appends it as a normal hash-chained log entry, and updates the cache fields.
+const REVOKE_ROLE_PUB_FIELD = { OWNER_REVOKE: 'owner_pub', VOUCHER_REVOKE: 'voucher_pub', AGENT_KEY_REVOKED: 'voucher_pub' };
+
+// Ground-truth revocation check, reused by (a) the mutation guards above, so a revoked badge
+// can never accumulate further non-revoke activity, and (b) verifyBadge()'s own log scan below
+// — one implementation, so the two can never disagree about what counts as "really revoked".
+function isRevoked(badge) {
+  const inc = badge.inception || {};
+  const log = Array.isArray(badge.log) ? badge.log : [];
+  for (const e of log) {
+    const pubField = REVOKE_ROLE_PUB_FIELD[e.action];
+    if (!pubField) continue;
+    const pub = pubField === 'owner_pub' ? inc.owner_pub : inc.voucher_pub;
+    const msg = attestationMessage(badge.agent_id, e.seq, e.action, e.detail || {});
+    if (verifyB64(pub, msg, e.revoke_attestation || '')) return true;
+  }
+  return false;
+}
+
+function _revokeEvent(badge, workRoot, role, action, reason, extraDetail = {}) {
+  // PROTOTYPE-ONLY: this still loads the full local keystore (all 3 keys sit in one file per
+  // this file's documented shortcut), but the event is signed with ONLY the one relevant
+  // private key below — the logic is production-shaped even though this environment's key
+  // custody isn't split yet. A production caller would only ever have `keys[role]` available.
+  const keys = loadKeys(workRoot, badge.agent_id);
+  const signerPriv = keys[role].priv;
+  const seq = badge.log.length;
+  // extraDetail spreads FIRST — protocol-computed fields (reason/signed_by/triggered_by) are
+  // listed AFTER and always win. Found by adversarial testing 2026-07-30: the previous spread
+  // order let a caller's extraDetail (e.g. agentKeyRevoked's mismatch evidence) silently
+  // override the protocol fields, corrupting audit metadata (didn't defeat the cryptographic
+  // verdict, since verification keys off `e.action`, but a `signed_by` that lies about who
+  // signed is still a real integrity bug in the audit trail).
+  // SAT-962: `revoked_at` added (2026-08-01) — the revoke path appended a log entry all along
+  // (action/reason/signed_by/triggered_by were already recorded), but no entry type in this
+  // codebase carried a timestamp. Adding it narrowly here, for revoke only, since that's what
+  // was actually flagged; extending timestamps to every log-entry type is a separate, broader
+  // schema question surfaced to Paul rather than assumed here.
+  const detail = {
+    ...extraDetail,
+    reason,
+    signed_by: role,                                              // D-24/VIA-091
+    triggered_by: action === 'AGENT_KEY_REVOKED' ? 'system' : 'principal', // D-24/VIA-091
+    revoked_at: new Date().toISOString(),                         // SAT-962
+  };
+  // Domain-separated attestation (agent_id/seq/action bound in) — see attestationMessage()'s
+  // comment for why: without this, a genuine ROTATION event's voucher_attestation could be
+  // replayed verbatim as a forged VOUCHER_REVOKE, needing zero private key material.
+  const revoke_attestation = signB64(signerPriv, attestationMessage(badge.agent_id, seq, action, detail));
+  const prev_hash = badge.log.length ? badge.log[badge.log.length - 1].entry_hash : 'GENESIS';
+  const body = { seq, action, model_used: null, detail, revoke_attestation, prev_hash };
+  const entry = { ...body, entry_hash: sha256(prev_hash + '\n' + canonical(body)) };
+  badge.log.push(entry);
+  // Cache fields only (D-24) — verifyBadge() derives ground truth from the log-scan below,
+  // regardless of what these say. Kept for fast-path convenience (e.g. a future dashboard
+  // list view that doesn't want to walk every badge's full log).
+  badge.revocation_state = 'REVOKED';
+  badge.revoked_reason = reason;
+  return badge; // NOT whole-badge resigned — see file header + coreAsSignedBeforeRevoke().
+}
+
+// Owner/developer revokes unilaterally — no cooperation from agent or voucher needed.
+export function ownerRevoke(badge, workRoot, reason = 'revoked') {
+  return _revokeEvent(badge, workRoot, 'owner', 'OWNER_REVOKE', reason);
+}
+// VIA ID's own action — directly, or (D-28, Wave 3) on a partnered org's entitlement-gated
+// behalf via the API Bridge. The org never touches badge key material either way.
+export function voucherRevoke(badge, workRoot, reason = 'revoked') {
+  return _revokeEvent(badge, workRoot, 'voucher', 'VOUCHER_REVOKE', reason);
+}
+// Never trust the agent to self-report a mutation (Paul, 2026-07-30) — this is never signed
+// by agent.priv. Voucher attests because it's the only party positioned to attest independently.
+// extraDetail is for the actual mismatch evidence (code_hash/model_set drift, etc.) — wiring
+// that up to a real independent detector is GraphSmith's job (VIA-094, Wave 1), not this file.
+export function agentKeyRevoked(badge, workRoot, reason = 'code_or_model_mismatch', extraDetail = {}) {
+  return _revokeEvent(badge, workRoot, 'voucher', 'AGENT_KEY_REVOKED', reason, extraDetail);
+}
+
+// Computes the message the whole-badge `signatures` should be checked against, tolerating a
+// trailing run of revoke-type log entries (which are deliberately NOT whole-badge-resigned,
+// see above). For any badge with zero revoke events — which is every badge minted before this
+// change, and the common case going forward — this is byte-for-byte identical to the old
+// coreForSigning() check. Only badges that have actually been revoked take the alternate path.
+function coreAsSignedBeforeRevoke(badge) {
+  const log = Array.isArray(badge.log) ? badge.log : [];
+  const inc = badge.inception || {};
+  let cut = log.length;
+  // Walk backward over the trailing run of revoke-type entries, but — unlike the original
+  // version, which trusted the `action` string alone — only tolerate an entry here if its
+  // attestation actually verifies against the correct role's pubkey. Found by adversarial
+  // testing 2026-07-30: checking only `e.action` let an attacker append an UNSIGNED (or
+  // wrong-key-signed) garbage entry labeled e.g. 'OWNER_REVOKE' at the tail, and the whole-badge
+  // signature check would silently "tolerate" it as if it were a legitimate revoke — polluting
+  // the tamper-evident log with unauthenticated content that cost the attacker nothing. Now,
+  // the moment a trailing entry's own attestation fails to verify, the truncation stops there
+  // and that entry (and anything above it) is treated as un-tolerated content the whole-badge
+  // signature must still cover — which it won't, so verifyBadge correctly reports INVALID
+  // instead of silently accepting the injected entry.
+  while (cut > 0) {
+    const e = log[cut - 1];
+    const pubField = REVOKE_ROLE_PUB_FIELD[e.action];
+    if (!pubField) break;
+    const pub = pubField === 'owner_pub' ? inc.owner_pub : inc.voucher_pub;
+    const msg = attestationMessage(badge.agent_id, e.seq, e.action, e.detail || {});
+    if (!verifyB64(pub, msg, e.revoke_attestation || '')) break;
+    cut--;
+  }
+  if (cut === log.length) return coreForSigning(badge); // no trailing revoke run — unchanged behavior
+  // revocation_state must be RESET to its pre-revoke value ('FRESH' — the only value it can
+  // ever have had before these revoke functions run), not deleted: the key was present and
+  // signed at mint/last-resign time, so dropping it entirely would change the canonical key
+  // set and break the match. revoked_reason, by contrast, never existed before revoke — drop it.
+  const { signatures, revoked_reason, ...rest } = badge;
+  return canonical({ ...rest, log: log.slice(0, cut), revocation_state: 'FRESH' });
+}
+
+// ---- verify (viaid verify / scan) → honest verdict ----
+// Fail-closed shape for a badge verifyBadgeInner() couldn't even get through — same keys as a
+// normal verdict, so callers never have to special-case a crash vs. a genuine INVALID.
+function invalidVerdict(reason) {
+  return {
+    verdict: 'INVALID', agent_id: undefined, assurance_tier: undefined,
+    coverage: 'no evaluation attached (identity + log only)',
+    scope_note: 'This verdict attests identity, signatures, and log integrity — not the safety, correctness, or compliance of the agent.',
+    confirmed_profiles: [], downgraded_profiles: [],
+    key_seq: 0, last_rotation_reason: null, last_rotation_at: null,
+    freshness_state: 'INVALID',
+    steps: [{ step: 'verify', status: 'FAIL', detail: reason }],
+  };
+}
+
+// SAT-958 / SAT-930-sync (2026-08-01): this repo's scope_note never carried the disclosure
+// that shipped to viaid-web/viaid-locked under SAT-930. Ported verbatim (plus this repo's own
+// more specific SELF-tier framing) so a caller of this library — not just a human reading the
+// source comments above — sees the honest limitation on every SELF-tier verdict.
+const SELF_TIER_SCOPE_NOTE =
+  'This verdict attests identity, signatures, and log integrity — not the safety, correctness, or compliance of the agent. ' +
+  'SELF-tier revocation is not externally witnessed: a holder of this badge\'s raw JSON before it was revoked can replay that ' +
+  'copy, and a holder of the current JSON can strip trailing revoke log entries, producing a badge that verifies VALID/FRESH ' +
+  'here. Closing this requires an online witness/transparency-log check (WITNESSED/HARDWARE assurance tiers, not yet built).';
+
+function verifyBadgeInner(badge) {
+  const steps = [];
+  const push = (step, ok, detail) => steps.push({ step, status: ok ? 'PASS' : 'FAIL', detail });
+  // Defensive normalization (found by adversarial testing 2026-07-30: hostile/malformed input —
+  // `badge.log` null/undefined/a non-array — crashed with an unhandled TypeError instead of
+  // returning INVALID). Every use below reads `log`, never `badge.log` directly.
+  const inc = (badge.inception && typeof badge.inception === 'object') ? badge.inception : {};
+  const log = Array.isArray(badge.log) ? badge.log : [];
+
+  // 1. id integrity: recompute agent_id from the inception event.
+  const recomputed = 'via_' + sha256(canonical(inc)).slice(0, 32);
+  push('agent_id == hash(inception)', recomputed === badge.agent_id, `${recomputed}`);
+
+  // 2a. owner + voucher keys never rotate in v1 — must stay exactly as pinned by inception.
+  const ownerVoucherBound =
+    badge.keys?.owner_pub === inc.owner_pub &&
+    badge.keys?.voucher_pub === inc.voucher_pub;
+  push('owner/voucher keys bound to inception', ownerVoucherBound, ownerVoucherBound ? '' : 'keys.{owner,voucher}_pub != inception.*_pub');
+
+  // 2b. the agent key CAN rotate — walk the ROTATION/COMPROMISE_ROTATION log events and confirm
+  // an unbroken chain from the inception commitment to the badge's current live pointers. This
+  // defeats: forged rotation w/o voucher co-sign, replayed rotation, wrong key_seq. The
+  // attestation check is domain-separated (agent_id/seq/action bound in, not bare
+  // canonical(detail)) — see attestationMessage()'s comment.
+  let seq = inc.key_seq ?? 0;
+  let commitment = inc.next_key_commitment;
+  let currentKey = inc.agent_pub;
+  let rotationChainOk = true;
+  let compromisedSince = null;
+  const rotationEntries = log.filter((e) => e.action === 'ROTATION' || e.action === 'COMPROMISE_ROTATION');
+  for (const e of rotationEntries) {
+    const d = e.detail || {};
+    const attestationOk = verifyB64(inc.voucher_pub, attestationMessage(badge.agent_id, e.seq, e.action, d), e.voucher_attestation || '');
+    const ok =
+      d.prev_key_seq === seq &&
+      d.new_key_seq === seq + 1 &&
+      d.prior_commitment === commitment &&
+      sha256(d.revealed_next_pub || '') === commitment &&
+      attestationOk;
+    if (!ok) { rotationChainOk = false; break; }
+    if (e.action === 'COMPROMISE_ROTATION') compromisedSince = d.suspected_since || null;
+    seq = d.new_key_seq; commitment = d.new_next_key_commitment; currentKey = d.revealed_next_pub;
+  }
+  if (rotationChainOk) {
+    const topKeySeq = badge.key_seq ?? inc.key_seq ?? 0;
+    const topCommitment = badge.next_key_commitment ?? inc.next_key_commitment;
+    rotationChainOk = currentKey === badge.keys?.agent_pub && seq === topKeySeq && commitment === topCommitment;
+  }
+  push('key rotation chain intact', rotationChainOk, `${rotationEntries.length} rotation event(s), key_seq=${seq}`);
+
+  const keysBound = ownerVoucherBound && rotationChainOk;
+
+  // 2c. revocation ground truth (D-24): scan the log for ANY valid per-role revoke event.
+  // Any ONE of the three roles is sufficient, and — since the hash-chained log is append-only
+  // and tamper-evident (step 4 below) — permanent: no later rotation event can clear it. This
+  // is checked independently of, and takes precedence over, the cached `revocation_state` field.
+  // Same domain-separated attestation check as isRevoked() (kept inline here so the reported
+  // `revokeEvent` detail is available for the step's log line) — the two must never disagree.
+  let revokedByLog = false;
+  let revokeEvent = null;
+  for (const e of log) {
+    const pubField = REVOKE_ROLE_PUB_FIELD[e.action];
+    if (!pubField) continue;
+    const pub = pubField === 'owner_pub' ? inc.owner_pub : inc.voucher_pub;
+    const msg = attestationMessage(badge.agent_id, e.seq, e.action, e.detail || {});
+    if (verifyB64(pub, msg, e.revoke_attestation || '')) {
+      revokedByLog = true;
+      revokeEvent = e;
+      break;
+    }
+  }
+  push('revocation log scan', !revokedByLog, revokedByLog ? `${revokeEvent.action}: ${revokeEvent.detail?.reason || ''}` : 'no valid revoke event found');
+
+  // 3. the three signatures — verified against the current (post-rotation) keys. Tolerates a
+  // trailing run of VALIDLY-ATTESTED revoke-type log entries (D-24) via
+  // coreAsSignedBeforeRevoke() — see its own comment above for why that's safe and
+  // back-compatible, and for the unsigned-tail-injection fix.
+  const msg = coreAsSignedBeforeRevoke(badge);
+  let sigOk = true;
+  try {
+    const s = badge.signatures || {};
+    const o = verifyB64(inc.owner_pub, msg, s.owner_sig || '');
+    const a = verifyB64(badge.keys?.agent_pub, msg, s.agent_sig || '');
+    const v = verifyB64(inc.voucher_pub, msg, s.voucher_sig || '');
+    sigOk = keysBound && o && a && v;
+    push('owner signature', o, '');
+    push('agent signature', a, '');
+    push('voucher signature', v, '');
+  } catch (e) { sigOk = false; push('signatures', false, e.message); }
+
+  // 4. hash-chain of the log (tamper-evident) — covers rotation AND revoke entries too
+  // (generic over body; revoke's own single-role attestation is checked separately at 2c).
+  // KNOWN, ACCEPTED LIMITATION (not fixable from inside a single offline file — flagged, not
+  // silently claimed away): this chain proves entries present in `log` haven't been altered or
+  // reordered, but proves nothing about entries that have been DELETED from the tail. A SELF-
+  // tier badge has no external anchor (no witness/transparency-log service) committing to "the
+  // log is at least N entries long", so an attacker holding nothing but the badge's own public
+  // JSON can truncate a trailing revoke run and this check — and the whole-badge signature check
+  // above, since both operate purely on whatever `log` currently contains — will not detect it.
+  // Closing this requires an ONLINE tip-freshness check (WITNESSED/HARDWARE assurance_tier,
+  // Wave 3/4+), not a change to this offline verifier. Never claim this chain proves
+  // non-truncation; it only proves tamper-evidence of what's present.
+  let chainOk = true, prev = 'GENESIS';
+  for (const e of log) {
+    const { entry_hash, ...body } = e;
+    const expect = sha256(prev + '\n' + canonical(body));
+    if (expect !== entry_hash || body.prev_hash !== prev) { chainOk = false; break; }
+    prev = entry_hash;
+  }
+  push('log hash-chain intact', chainOk, `${log.length} entries`);
+
+  // 5. offline freshness/revocation state. `revocation_state` is a best-effort CACHE (D-24) —
+  // REVOKED is honored if EITHER the log-scan (2c, the real ground truth) OR the cached field
+  // says so (kept as an OR-fallback purely for badges revoked by the pre-D-24 code path, which
+  // never wrote a log entry — this can only ever ADD a true REVOKED, never hide one).
+  // STALE/UNKNOWN are still COMPUTED at verify time, never stored (D-15 offline states).
+  const issuedAtMs = inc.issued_at ? Date.parse(inc.issued_at) : NaN;
+  const ttlMs = typeof inc.badge_ttl === 'number' ? inc.badge_ttl * 1000 : NaN;
+  let offline_state;
+  if (revokedByLog || badge.revocation_state === 'REVOKED') offline_state = 'REVOKED';
+  else if (!Number.isFinite(issuedAtMs) || !Number.isFinite(ttlMs)) offline_state = 'UNKNOWN';
+  else if (Date.now() - issuedAtMs > ttlMs) offline_state = 'STALE';
+  else offline_state = 'FRESH';
+  push('freshness / revocation state', offline_state === 'FRESH', offline_state);
+
+  const structurally_valid = recomputed === badge.agent_id && sigOk && chainOk;
+  const verdict = !structurally_valid ? 'INVALID'
+    : offline_state === 'REVOKED' ? 'REVOKED'
+    : offline_state === 'STALE' ? 'STALE'
+    : offline_state === 'UNKNOWN' ? 'UNKNOWN'
+    : 'VALID';
+
+  // coverage + assurance tier — honest scope, never "everything the agent did".
+  const ev = badge.evidence;
+  const coverage = ev
+    ? `GraphSmith eval: ${ev.status}; confirmed profiles [${(ev.confirmed_profiles || []).join(', ') || 'none'}]`
+    : 'no evaluation attached (identity + log only)';
+  const assurance_tier = badge.assurance_tier; // SELF here
+  // SAT-958/SAT-930-sync: SELF-tier badges always carry the honest external-witness disclosure
+  // (see SELF_TIER_SCOPE_NOTE above); WITNESSED/HARDWARE tiers (not yet built) would not need
+  // this specific caveat once they exist, so the check is tier-conditional even though only
+  // SELF exists today.
+  let scope_note = ev?.note
+    || (assurance_tier === 'SELF' ? SELF_TIER_SCOPE_NOTE
+      : 'This verdict attests identity, signatures, and log integrity — not the safety, correctness, or compliance of the agent.');
+  if (compromisedSince) {
+    scope_note += ` Note: a COMPROMISE_ROTATION event flags key material suspected compromised since ${compromisedSince} — log entries in that window should be discounted by the reader, not treated as trusted.`;
+  }
+
+  return {
+    verdict, agent_id: badge.agent_id, assurance_tier, coverage, scope_note,
+    confirmed_profiles: ev?.confirmed_profiles || [],
+    downgraded_profiles: ev?.downgraded_profiles || [], // shown grey, never green
+    key_seq: badge.key_seq ?? inc.key_seq ?? 0,
+    last_rotation_reason: badge.last_rotation_reason ?? null,
+    last_rotation_at: badge.last_rotation_at ?? null,
+    // computed FRESH/STALE/REVOKED/UNKNOWN (D-15) — the UI should read THIS, not the stored
+    // badge.revocation_state field directly, since STALE/UNKNOWN only ever exist as a function
+    // of "now", never as a value written into the badge itself.
+    freshness_state: offline_state,
+    steps,
+  };
+}
+
+// ---- verify (viaid verify / scan) → honest verdict ----
+// Thin fail-closed wrapper around verifyBadgeInner(): hostile/malformed input (found by
+// adversarial testing 2026-07-30 — independently, from 3 different angles) must return a clean
+// INVALID verdict, never throw an uncaught exception past this boundary.
+export function verifyBadge(badge) {
+  if (!badge || typeof badge !== 'object') return invalidVerdict('badge is not an object');
+  try {
+    return verifyBadgeInner(badge);
+  } catch (e) {
+    return invalidVerdict('verify crashed on malformed/hostile input: ' + (e && e.message ? e.message : String(e)));
+  }
+}
+
+// ---- verify-time witness check (SAT-934, tier-conditional) — see the SAT-958 follow-up
+// comment above mintWitnessedBadge() for provenance/scope. verifyBadge() itself stays 100%
+// synchronous and byte-for-byte unchanged; verifyBadgeWitnessed() is a new, purely additive
+// async wrapper around it.
+//
+// Tier-conditional: SELF-tier badges get witness_state: 'NOT_APPLICABLE' and ZERO network
+// calls — byte-identical to what verifyBadge() already returns, with one field added.
+// WITNESSED-tier badges get an online point-lookup against the witness service BY DEFAULT
+// (the opt-in already happened at mint time); pass { checkWitness: false } to force-skip it.
+//
+// OR-ONLY RULE (mirrors isRevoked()'s local OR-fallback, and this file's own CLAIM DISCIPLINE
+// header — never claim a stronger guarantee than what actually happened): the witness can only
+// ever ADD a REVOKED verdict the local log doesn't show — it can never clear one the log does
+// show, and it never upgrades a structurally INVALID badge into looking like a legitimately-
+// signed-then-revoked one, which would misrepresent a forgery as a real prior badge.
+//
+// witness_state values: CHECKED_CLEAN / CHECKED_REVOKED / UNREACHABLE (call failed or timed
+// out, fell back to local-log-only semantics) / NOT_APPLICABLE (SELF-tier) / SKIPPED (caller
+// explicitly passed checkWitness: false — a different fact than UNREACHABLE, so kept distinct).
+export async function verifyBadgeWitnessed(badge, { checkWitness = true, witnessServiceUrl } = {}) {
+  const verdict = verifyBadge(badge);
+  const tier = (badge && typeof badge === 'object') ? badge.assurance_tier : undefined;
+
+  if (tier !== 'WITNESSED') {
+    return { ...verdict, witness_state: 'NOT_APPLICABLE' };
+  }
+  if (!checkWitness) {
+    return {
+      ...verdict, witness_state: 'SKIPPED',
+      scope_note: `${verdict.scope_note} The online witness check was explicitly skipped for this verify call — this verdict relies on local-log-only semantics, same as a SELF-tier badge.`,
+    };
+  }
+
+  const url = witnessServiceUrl || WITNESS_SERVICE_URL;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), WITNESS_HTTP_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(`${url}/api/witness-status?agent_id=${encodeURIComponent(verdict.agent_id || badge.agent_id || '')}`, { signal: ctrl.signal });
+  } catch {
+    return {
+      ...verdict, witness_state: 'UNREACHABLE',
+      scope_note: `${verdict.scope_note} The online witness check was attempted but the witness service was unreachable — this verdict fell back to local-log-only semantics, same as a SELF-tier badge, despite being WITNESSED-tier.`,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!res.ok) {
+    return {
+      ...verdict, witness_state: 'UNREACHABLE',
+      scope_note: `${verdict.scope_note} The online witness check was attempted but the witness service returned HTTP ${res.status} — this verdict fell back to local-log-only semantics, same as a SELF-tier badge, despite being WITNESSED-tier.`,
+    };
+  }
+  let body;
+  try { body = await res.json(); } catch {
+    return {
+      ...verdict, witness_state: 'UNREACHABLE',
+      scope_note: `${verdict.scope_note} The online witness check was attempted but the witness service's response was not valid JSON — this verdict fell back to local-log-only semantics, same as a SELF-tier badge, despite being WITNESSED-tier.`,
+    };
+  }
+
+  if (body && body.witnessed === true) {
+    // OR-only escalation: never downgrade an already-INVALID verdict into looking like a
+    // legitimately-signed-then-revoked badge — see the function header comment for why.
+    const forcedVerdict = verdict.verdict === 'INVALID' ? verdict.verdict : 'REVOKED';
+    return {
+      ...verdict, verdict: forcedVerdict, witness_state: 'CHECKED_REVOKED',
+      scope_note: `${verdict.scope_note} The witness service independently confirms a revocation (${body.action || 'unknown action'}) is on record for this agent_id — this holds even if the locally-presented badge's own log has been truncated to hide it, closing the SELF-tier log-truncation gap described above.`,
+    };
+  }
+  return {
+    ...verdict, witness_state: 'CHECKED_CLEAN',
+    scope_note: `${verdict.scope_note} The witness service independently confirms no revocation is on record for this agent_id — unlike SELF-tier, this is not solely reliant on the locally-presented badge's own (potentially truncated) log.`,
+  };
+}
+
+export function loadBadge(p) { return JSON.parse(readFileSync(p, 'utf8')); }
+export function saveBadge(p, badge) { writeFileSync(p, JSON.stringify(badge, null, 2)); return p; }
+export { existsSync };
+
+// Crockford Base32 (no I/L/O/U — avoids exactly the human-typing confusion this exists to
+// fix). Pure/stateless — kept identical to viaid-web/lib/agentid-core.mjs's copy (D-23) so
+// a short code computed locally by the CLI/skill matches the one the hosted verify page shows.
+const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ';
+export function shortCodeFrom(agentId, len = 7) {
+  const h = sha256('shortcode:' + agentId);
+  let out = '';
+  for (let i = 0; i < len; i++) {
+    const byte = parseInt(h.slice(i * 2, i * 2 + 2), 16);
+    out += CROCKFORD[byte % 32];
+  }
+  return out;
+}
