@@ -33,7 +33,7 @@
 //    downstream tool can decide what to discount, rather than guessing a discounting policy.
 
 import { generateKeyPairSync, sign as edSign, verify as edVerify, createHash, createPrivateKey, createPublicKey } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 const SCHEMA = 'viaid.badge/0.1';
@@ -68,11 +68,19 @@ function verifyB64(pubB64, msg, sigB64) {
 }
 
 // ---- keystore (PROTOTYPE ONLY) ----
+// SAT-957 (CRITICAL, fixed here to match VIAID-LOCKED/prototype and skill copies, 2026-08-02):
+// this file previously wrote the keystore with no restrictive file mode (0644/world-readable).
+// Fixed: request 0600 at create time AND force it with an explicit chmodSync afterward, since
+// writeFileSync's `mode` option only governs permissions at file CREATION and is silently
+// ignored for a pre-existing file written before this fix. Honest disclosure (ported from the
+// other two copies' comment): meaningful protection on Linux/macOS (POSIX bits), but does NOT
+// by itself achieve equivalent protection on Windows, where NTFS ACLs govern real access control.
 function keystorePath(root, agentId) { return join(root, '.keys', agentId + '.json'); }
 function saveKeys(root, agentId, keys) {
   const p = keystorePath(root, agentId);
   mkdirSync(dirname(p), { recursive: true });
-  writeFileSync(p, JSON.stringify(keys, null, 2));
+  writeFileSync(p, JSON.stringify(keys, null, 2), { mode: 0o600 });
+  chmodSync(p, 0o600);
 }
 function loadKeys(root, agentId) {
   return JSON.parse(readFileSync(keystorePath(root, agentId), 'utf8'));
