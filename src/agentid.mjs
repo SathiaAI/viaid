@@ -144,6 +144,68 @@ export function mintBadge({ name, owner = 'local-dev', workRoot, badge_ttl = DEF
   return badge;
 }
 
+// ---- WITNESSED tier: mint (viaid init --witnessed) — SAT-958 fix, ported from
+// viaid-locked/prototype/src/agentid.mjs (canonical, SAT-933/934, merged 2026-08-01). Gives
+// holders of this published package an actual path to close the SAT-958 SELF-tier gap
+// disclosed in verifyBadge()'s scope_note below — not previously available here.
+const WITNESS_HTTP_TIMEOUT_MS = Number(process.env.VIAID_WITNESS_TIMEOUT_MS || 10000);
+
+// Single swap point, per the commitment made when this shipped (2026-08-01): the only
+// production default hardcoded in this file. Once a custom domain (e.g. witness.viaid.ai) is
+// live, change ONLY this line (or set VIAID_WITNESS_URL) — nothing else here needs to change.
+const WITNESS_SERVICE_URL = process.env.VIAID_WITNESS_URL || 'https://witness.viaid.ai';
+
+// Mirrors viaid-witness's lib/witness.mjs `registrationAttestationMessage(agent_id, owner_pub,
+// voucher_pub)` BYTE FOR BYTE — same canonical() algorithm (this file's canonical() is the same
+// stable-key-order implementation the witness service copies from viaid-web/lib/agentid-core.mjs),
+// same field set. The server recomputes and checks this exact message; any drift here makes
+// every owner_sig/voucher_sig fail server-side verification.
+function registrationAttestationMessage(agentId, ownerPub, voucherPub) {
+  return canonical({ purpose: 'witness_registration', agent_id: agentId, owner_pub: ownerPub, voucher_pub: voucherPub });
+}
+
+export async function mintWitnessedBadge(opts) {
+  const witnessServiceUrl = (opts && opts.witnessServiceUrl) || WITNESS_SERVICE_URL;
+
+  // Step 1: mint exactly as SELF-tier, via the existing unchanged path — same inception, same
+  // agent_id derivation, same keystore write. No new failure surface introduced here.
+  const badge = mintBadge(opts);
+  const keys = loadKeys(opts.workRoot, badge.agent_id);
+
+  // Step 2: sign the registration attestation with the REAL owner/voucher private keys — never
+  // agent (matches REVOKE_ROLE_PUB_FIELD's established "agent never self-attests a mutation").
+  const msg = registrationAttestationMessage(badge.agent_id, badge.inception.owner_pub, badge.inception.voucher_pub);
+  const owner_sig = signB64(keys.owner.priv, msg);
+  const voucher_sig = signB64(keys.voucher.priv, msg);
+
+  // Step 3: register with the witness service. Fail-closed — see header comment.
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), WITNESS_HTTP_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(`${witnessServiceUrl}/api/witness-register`, {
+      method: 'POST',
+      signal: ctrl.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ inception: badge.inception, owner_sig, voucher_sig }),
+    });
+  } catch (e) {
+    throw new Error(`WITNESSED mint failed: witness-register request to ${witnessServiceUrl} errored — ${e.message}`);
+  } finally {
+    clearTimeout(timer);
+  }
+  let body = null;
+  try { body = await res.json(); } catch { /* non-JSON error body — fall through with body=null */ }
+  if (!res.ok) {
+    throw new Error(`WITNESSED mint failed: witness-register returned HTTP ${res.status}${body && body.error ? ` — ${body.error}` : ''}`);
+  }
+
+  // Step 4: only NOW claim WITNESSED — re-sign the whole badge core so the tier change itself is
+  // covered by the same whole-badge signature every other field already is.
+  badge.assurance_tier = 'WITNESSED';
+  return resign(badge, keys);
+}
+
 // ---- append a hash-chained log entry (viaid log) ----
 export function appendLog(badge, workRoot, { action, model_used = null, detail = null }) {
   const prev_hash = badge.log.length ? badge.log[badge.log.length - 1].entry_hash : 'GENESIS';
@@ -324,6 +386,13 @@ export function verifyBadge(badge) {
   const assurance_tier = badge.assurance_tier; // SELF here
   let scope_note = ev?.note
     || 'This verdict attests identity, signatures, and log integrity — not the safety, correctness, or compliance of the agent.';
+  // SAT-930/SAT-958: honesty fix — a SELF-tier VALID/non-REVOKED verdict must not read as a
+  // stronger guarantee than it is. Only the ONLINE witness check (Wave 0) can close this;
+  // until a badge is WITNESSED/HARDWARE tier, say so plainly. Ported from viaid-locked's
+  // prototype/src/agentid.mjs (canonical).
+  if (assurance_tier === 'SELF') {
+    scope_note += " SELF-tier revocation is not externally witnessed — a holder of this badge's raw JSON could locally suppress a revocation event, and this verifier cannot detect that.";
+  }
   if (compromisedSince) {
     scope_note += ` Note: a COMPROMISE_ROTATION event flags key material suspected compromised since ${compromisedSince} — log entries in that window should be discounted by the reader, not treated as trusted.`;
   }
@@ -340,6 +409,68 @@ export function verifyBadge(badge) {
     // of "now", never as a value written into the badge itself.
     freshness_state: offline_state,
     steps,
+  };
+}
+
+// ---- WITNESSED tier: verify (viaid verify, when badge.assurance_tier === 'WITNESSED') —
+// SAT-958 fix. Independently confirms revocation status with witness.viaid.ai, which a
+// locally-doctored (truncated) log copy cannot spoof — this is what actually closes the
+// SELF-tier gap disclosed in verifyBadge()'s scope_note above. Ported from viaid-locked/
+// prototype/src/agentid.mjs (canonical).
+export async function verifyBadgeWitnessed(badge, { checkWitness = true, witnessServiceUrl } = {}) {
+  const verdict = verifyBadge(badge);
+  const tier = (badge && typeof badge === 'object') ? badge.assurance_tier : undefined;
+
+  if (tier !== 'WITNESSED') {
+    return { ...verdict, witness_state: 'NOT_APPLICABLE' };
+  }
+  if (!checkWitness) {
+    return {
+      ...verdict, witness_state: 'SKIPPED',
+      scope_note: `${verdict.scope_note} The online witness check was explicitly skipped for this verify call — this verdict relies on local-log-only semantics, same as a SELF-tier badge.`,
+    };
+  }
+
+  const url = witnessServiceUrl || WITNESS_SERVICE_URL;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), WITNESS_HTTP_TIMEOUT_MS);
+  let res;
+  try {
+    res = await fetch(`${url}/api/witness-status?agent_id=${encodeURIComponent(verdict.agent_id || badge.agent_id || '')}`, { signal: ctrl.signal });
+  } catch {
+    return {
+      ...verdict, witness_state: 'UNREACHABLE',
+      scope_note: `${verdict.scope_note} The online witness check was attempted but the witness service was unreachable — this verdict fell back to local-log-only semantics, same as a SELF-tier badge, despite being WITNESSED-tier.`,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+  if (!res.ok) {
+    return {
+      ...verdict, witness_state: 'UNREACHABLE',
+      scope_note: `${verdict.scope_note} The online witness check was attempted but the witness service returned HTTP ${res.status} — this verdict fell back to local-log-only semantics, same as a SELF-tier badge, despite being WITNESSED-tier.`,
+    };
+  }
+  let body;
+  try { body = await res.json(); } catch {
+    return {
+      ...verdict, witness_state: 'UNREACHABLE',
+      scope_note: `${verdict.scope_note} The online witness check was attempted but the witness service's response was not valid JSON — this verdict fell back to local-log-only semantics, same as a SELF-tier badge, despite being WITNESSED-tier.`,
+    };
+  }
+
+  if (body && body.witnessed === true) {
+    // OR-only escalation: never downgrade an already-INVALID verdict into looking like a
+    // legitimately-signed-then-revoked badge — see the function header comment for why.
+    const forcedVerdict = verdict.verdict === 'INVALID' ? verdict.verdict : 'REVOKED';
+    return {
+      ...verdict, verdict: forcedVerdict, witness_state: 'CHECKED_REVOKED',
+      scope_note: `${verdict.scope_note} The witness service independently confirms a revocation (${body.action || 'unknown action'}) is on record for this agent_id — this holds even if the locally-presented badge's own log has been truncated to hide it, closing the SELF-tier log-truncation gap described above.`,
+    };
+  }
+  return {
+    ...verdict, witness_state: 'CHECKED_CLEAN',
+    scope_note: `${verdict.scope_note} The witness service independently confirms no revocation is on record for this agent_id — unlike SELF-tier, this is not solely reliant on the locally-presented badge's own (potentially truncated) log.`,
   };
 }
 
