@@ -13,7 +13,7 @@ process.env.VIAID_WITNESS_TIMEOUT_MS = '80';
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -689,4 +689,144 @@ test('verifyBadgeWitnessed treats a witness response missing agent_id entirely a
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ============================================================================================
+// 5th review round findings below (this round's own adversarial review, found independently by
+// three reviewers: correctness-2, data_privacy-F1, SEC-004).
+// ============================================================================================
+
+// Regression test for the mintBadge()/loadKeys() try-block boundary fix: previously these ran
+// BEFORE the try block that protects against orphaned keys, so a failure between them (or inside
+// mintBadge() itself) was either unprotected or, in mintBadge()'s specific case, unreachable via
+// the catch's `badge.agent_id` reference (badge didn't exist yet). This drives a real failure
+// through mintBadge() itself (workRoot is a FILE, not a directory, so the internal saveKeys() ->
+// mkdirSync(dirname(p), {recursive:true}) throws ENOTDIR before anything is written anywhere) and
+// confirms the error propagates cleanly with no crash in the cleanup path itself.
+test('mintWitnessedBadge propagates a mintBadge()-level failure cleanly (nothing was ever written, so cleanup is correctly skipped)', async () => {
+  const root = tmpRoot();
+  try {
+    const workRootAsFile = join(root, 'not-a-directory');
+    writeFileSync(workRootAsFile, 'x');
+    // Asserts the SPECIFIC original filesystem error (code ENOTDIR) propagates unchanged, not
+    // just "some" rejection -- a buggy cleanup guard that crashed on `badge` being undefined
+    // (e.g. an unconditional `badge.agent_id` access instead of the `if (badge && ...)` check)
+    // would also reject, but with a DIFFERENT (TypeError) message, which a bare assert.rejects()
+    // with no pattern would not have caught.
+    await assert.rejects(
+      () => aid.mintWitnessedBadge({ name: 'a', workRoot: workRootAsFile }),
+      (err) => err.code === 'ENOTDIR',
+      'expected the original ENOTDIR error to propagate unchanged, not a secondary error from the cleanup guard',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// SEC-002 regression: assertSafeWitnessUrl() only validates the INITIAL URL; fetch() follows
+// redirects by default with no scheme re-validation on the target. Both fetch() call sites now
+// pass redirect:'manual', which turns a redirect into an opaqueredirect response (ok:false,
+// status:0) instead of following it. Each test below asserts TWO things, deliberately: (1) that
+// the source code actually requests redirect:'manual' on the call (inspecting the mock's own
+// `opts` argument) -- without this, a test that only supplies a canned opaqueredirect-shaped
+// response would still pass even if the fix were reverted, since the pre-existing `!res.ok`
+// handling (added in an earlier round for ordinary non-2xx responses) would coincidentally also
+// "handle" a hand-crafted opaqueredirect object without redirect:'manual' ever being set for
+// real; and (2) that this codebase's own handling of the resulting response shape fails closed
+// (the redirect-vs-follow behavior itself is a Node/undici guarantee, not retested here).
+test('mintWitnessedBadge requests redirect:manual and fails closed on a redirect response, leaving no orphaned keys', async () => {
+  const root = tmpRoot();
+  try {
+    let sawRedirectOption;
+    await assert.rejects(
+      () => withMockFetch(
+        async (_url, opts) => {
+          sawRedirectOption = opts?.redirect;
+          return { ok: false, status: 0, type: 'opaqueredirect', json: () => Promise.reject(new Error('no body on an opaque redirect')) };
+        },
+        () => aid.mintWitnessedBadge({ name: 'a', workRoot: root }),
+      ),
+      /witness-register returned HTTP 0/,
+    );
+    assert.equal(sawRedirectOption, 'manual', 'the witness-register fetch() must set redirect:"manual" so a redirect is never silently followed');
+    const keysDir = join(root, '.keys');
+    const remaining = existsSync(keysDir) ? readdirSync(keysDir) : [];
+    assert.deepEqual(remaining, [], 'a rejected (redirected) registration must not leave orphaned keys either');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('verifyBadgeWitnessed requests redirect:manual and treats a redirect response as unreachable (UNKNOWN)', async () => {
+  const root = tmpRoot();
+  try {
+    const badge = await mintFakeWitnessedBadge(root);
+    let sawRedirectOption;
+    const result = await withMockFetch(
+      async (_url, opts) => {
+        sawRedirectOption = opts?.redirect;
+        return { ok: false, status: 0, type: 'opaqueredirect', json: () => Promise.reject(new Error('no body on an opaque redirect')) };
+      },
+      () => aid.verifyBadgeWitnessed(badge),
+    );
+    assert.equal(sawRedirectOption, 'manual', 'the witness-status fetch() must set redirect:"manual" so a redirect is never silently followed');
+    assert.equal(result.witness_state, 'UNREACHABLE');
+    assert.equal(result.verdict, 'UNKNOWN');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ============================================================================================
+// reliability-3 / test_quality-F2 (5th review round): removeOrphanedKeys() used to swallow any
+// cleanup failure other than ENOENT — logged via console.warn, then fully discarded, with no way
+// for a caller to know private key material might still be sitting on disk. This exercises a
+// GENUINE cleanup failure (not a mock): the keystore file mintBadge() actually wrote is swapped
+// out for a directory at the same path before the registration call fails, so removeOrphanedKeys()'s
+// own unlinkSync() call hits a real EISDIR/EPERM. This works identically whether the test runs as
+// root or not — unlike a chmod-based permission test, which root bypasses — because unlink() on a
+// directory is rejected by the kernel unconditionally, not by a permission check.
+// ============================================================================================
+test('mintWitnessedBadge surfaces a cleanup failure on the original error instead of silently swallowing it', async () => {
+  const root = tmpRoot();
+  try {
+    await assert.rejects(
+      () => withMockFetch(
+        async () => {
+          const keysDir = join(root, '.keys');
+          const [keystoreFile] = readdirSync(keysDir);
+          const keystorePath = join(keysDir, keystoreFile);
+          rmSync(keystorePath, { force: true });
+          mkdirSync(keystorePath); // same path, now a directory -> unlinkSync() must fail, not silently succeed
+          return fakeResponse({ ok: false, status: 503 });
+        },
+        () => aid.mintWitnessedBadge({ name: 'a', workRoot: root }),
+      ),
+      (err) => {
+        assert.match(err.message, /witness-register returned HTTP 503/, 'the ORIGINAL registration error must still propagate unchanged -- cleanup failing must never mask it');
+        assert.equal(err.keystoreCleanupFailed, true, 'the original error must be annotated when cleanup itself also fails');
+        assert.ok(err.keystoreCleanupError, 'the underlying cleanup error must be attached, not discarded');
+        assert.notEqual(err.keystoreCleanupError.code, 'ENOENT', 'sanity: this must be a real non-ENOENT cleanup failure, not the already-covered missing-file case');
+        return true;
+      },
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true }); // recursive:true handles the now-a-directory keystore path fine
+  }
+});
+
+test('mintWitnessedBadge does NOT set keystoreCleanupFailed when cleanup genuinely succeeds (no regression on the happy path)', async () => {
+  const root = tmpRoot();
+  await assert.rejects(
+    () => withMockFetch(
+      async () => fakeResponse({ ok: false, status: 503 }),
+      () => aid.mintWitnessedBadge({ name: 'a', workRoot: root }),
+    ),
+    (err) => {
+      assert.equal(err.keystoreCleanupFailed, undefined);
+      assert.equal(err.keystoreCleanupError, undefined);
+      return true;
+    },
+  );
+  rmSync(root, { recursive: true, force: true });
 });
