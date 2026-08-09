@@ -170,4 +170,16 @@ if (!fn) {
   process.exit(cmd ? 1 : 0);
 }
 try { await fn(args); }
-catch (e) { console.error('✖', e.message); process.exit(1); }
+catch (e) {
+  console.error('✖', e.message);
+  // POST-REVIEW FIX (wave 6, reliability-3 follow-up): mintWitnessedBadge() has annotated a mint
+  // error with keystoreCleanupFailed/keystoreCleanupError since the 5th review round's fix (see
+  // src/agentid.mjs), but nothing ever read those properties — this CLI catch, the only place a
+  // real `viaid` run's errors surface to a person, was silently dropping that diagnostic. Without
+  // this, someone who hits a mint failure AND a keystore-cleanup failure sees only the original
+  // error and has no idea a private-key file may be orphaned on disk under .keys/.
+  if (e.keystoreCleanupFailed) {
+    console.error(`  Also: could not clean up the local private-key file for this attempt (${e.keystoreCleanupError.message}) — you may need to remove it from .keys/ manually.`);
+  }
+  process.exit(1);
+}

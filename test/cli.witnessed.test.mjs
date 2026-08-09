@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync, readdirSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -186,6 +186,54 @@ test('CLI: init without --witnessed stays SELF-tier and never talks to the witne
     assert.doesNotMatch(verify.stdout, /witness=/);
 
     assert.equal(calls.length, 0, `expected zero witness-service calls for a SELF-tier badge; calls seen: ${calls.join(', ') || '(none)'}`);
+  } finally {
+    server.close();
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+// POST-REVIEW FIX (wave 6, reliability-3 follow-up): src/agentid.mjs's mintWitnessedBadge() has
+// annotated a mint error with keystoreCleanupFailed/keystoreCleanupError since the 5th review
+// round (see the library-level 'mintWitnessedBadge surfaces a cleanup failure...' test in
+// test/agentid.witnessed.test.mjs), but bin/viaid.mjs's top-level catch never read those
+// properties — a real `viaid` run silently dropped this diagnostic. This is the CLI-level
+// counterpart of that library-level test: a real subprocess, a real registration failure, and a
+// real (root-independent) cleanup failure, verifying the extra line actually reaches the user's
+// terminal. Uses the SAME swap-the-keystore-file-for-a-directory technique as the library-level
+// test — unlinkSync() on a directory is rejected by the kernel unconditionally, unlike a
+// chmod-based permission test, which root (this sandbox's user) would bypass. The swap happens
+// from the mock witness server's own request handler, which runs in THIS (parent) process and
+// shares the real filesystem with the child CLI subprocess — by the time a POST /api/
+// witness-register request arrives, the child has already synchronously written its keystore
+// file (mintBadge() runs before the network call), so this is a safe, deterministic
+// synchronization point, not a timing race.
+test('CLI: surfaces a keystore-cleanup failure to the user when one happens alongside a mint failure', async () => {
+  const work = mkdtempSync(join(tmpdir(), 'viaid-cli-test-'));
+  const server = createServer((req, res) => {
+    if (req.method === 'POST' && req.url.startsWith('/api/witness-register')) {
+      req.resume();
+      req.on('end', () => {
+        const keysDir = join(work, '.keys');
+        const [keystoreFile] = readdirSync(keysDir);
+        const keystorePath = join(keysDir, keystoreFile);
+        rmSync(keystorePath, { force: true });
+        mkdirSync(keystorePath); // same path, now a directory -> the client's cleanup unlinkSync() must fail
+        res.writeHead(503, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ error: 'service unavailable' }));
+      });
+      return;
+    }
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'not found in mock' }));
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  try {
+    const port = server.address().port;
+    const env = { ...process.env, VIAID_WORK: work, VIAID_WITNESS_URL: `http://127.0.0.1:${port}`, VIAID_WITNESS_TIMEOUT_MS: '3000' };
+    const init = await runCli(['init', 'cleanup-fail-agent', '--witnessed'], env);
+    assert.notEqual(init.code, 0, 'a failed registration must still exit nonzero');
+    assert.match(init.stderr, /witness-register returned HTTP 503/, 'the original mint error must still be shown, not masked by the cleanup failure');
+    assert.match(init.stderr, /could not clean up the local private-key file/i, 'a keystore-cleanup failure must be surfaced to the user, not silently dropped');
   } finally {
     server.close();
     rmSync(work, { recursive: true, force: true });
