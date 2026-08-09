@@ -33,7 +33,7 @@
 //    downstream tool can decide what to discount, rather than guessing a discounting policy.
 
 import { generateKeyPairSync, sign as edSign, verify as edVerify, createHash, createPrivateKey, createPublicKey } from 'node:crypto';
-import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, chmodSync, unlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 
 const SCHEMA = 'viaid.badge/0.1';
@@ -84,6 +84,17 @@ function saveKeys(root, agentId, keys) {
 }
 function loadKeys(root, agentId) {
   return JSON.parse(readFileSync(keystorePath(root, agentId), 'utf8'));
+}
+// POST-REVIEW FIX (4th round): best-effort cleanup for mintWitnessedBadge()'s rollback path
+// below — never let a cleanup failure mask the original, more important error that triggered it.
+function removeOrphanedKeys(root, agentId) {
+  try {
+    unlinkSync(keystorePath(root, agentId));
+  } catch (e) {
+    if (e.code !== 'ENOENT') {
+      console.warn(`[viaid:witness] mint failed AND could not clean up the orphaned keystore file for ${agentId} — ${e.message}`);
+    }
+  }
 }
 
 // The three signatures cover the badge core (everything except `.signatures`).
@@ -211,61 +222,85 @@ export async function mintWitnessedBadge(opts) {
   const badge = mintBadge(opts);
   const keys = loadKeys(opts.workRoot, badge.agent_id);
 
-  // Step 2: sign the registration attestation with the REAL owner/voucher private keys — never
-  // agent (matches REVOKE_ROLE_PUB_FIELD's established "agent never self-attests a mutation").
-  const msg = registrationAttestationMessage(badge.agent_id, badge.inception.owner_pub, badge.inception.voucher_pub);
-  const owner_sig = signB64(keys.owner.priv, msg);
-  const voucher_sig = signB64(keys.voucher.priv, msg);
-
-  // Step 3: register with the witness service. Fail-closed — see header comment.
-  //
-  // PRIVACY NOTE (post-review disclosure fix): `inception` — including `name` and `owner_id` —
-  // is sent to the witness service IN FULL, deliberately. The server independently recomputes
-  // agent_id = hash(canonical(inception)) (viaid-witness's lib/witness.mjs registerAgent()) to
-  // bind the registration to a caller-unforgeable id; withholding any inception field would make
-  // the server's recomputed agent_id diverge from this badge's real one. There is no way to
-  // minimize this payload without changing that hash-binding protocol on the server side too
-  // (out of scope here). Only reached when the caller explicitly opts into WITNESSED tier (viaid
-  // init --witnessed) — never on the default SELF-tier mint path. Logged so this is visible at
-  // the point of action, not just in a comment.
-  console.warn(`[viaid:witness] mint: registering with ${witnessServiceUrl} — this sends the full inception object (including name, owner_id) to a third party.`);
-  const ctrl = new AbortController();
-  const timer = setTimeout(() => ctrl.abort(), WITNESS_HTTP_TIMEOUT_MS);
-  let res, body = null;
+  // POST-REVIEW FIX (4th round): everything from here on can fail (network error, non-2xx,
+  // unconfirmed body, timeout) AFTER step 1 has already written real owner/agent/voucher/
+  // next-agent PRIVATE KEY material to workRoot/.keys/<agent_id>.json. Previously, any failure
+  // below left that keystore file orphaned on disk forever — referenced by no badge (the CLI only
+  // ever calls saveBadge() once this function returns successfully), with no command to find or
+  // clean it up. Every retry during a witness-service outage silently left another one behind.
+  // Wrapped so any failure below rolls that keystore file back before propagating the real error.
   try {
-    try {
-      res = await fetch(`${witnessServiceUrl}/api/witness-register`, {
-        method: 'POST',
-        signal: ctrl.signal,
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ inception: badge.inception, owner_sig, voucher_sig }),
-      });
-    } catch (e) {
-      throw new Error(`WITNESSED mint failed: witness-register request to ${witnessServiceUrl} errored — ${e.message}`);
-    }
-    // POST-REVIEW FIX: the body read now happens INSIDE the same timer-protected scope. Previously
-    // clearTimeout() ran right after fetch() resolved (headers only), so a response that stalled
-    // mid-body could hang this call forever. A stalled body now hits the same abort signal and
-    // fails closed, matching this function's own "fail-closed" contract; a non-JSON body on an
-    // otherwise-OK response stays lenient (body just stays null), same as before.
-    try {
-      body = await res.json();
-    } catch {
-      if (ctrl.signal.aborted) {
-        throw new Error(`WITNESSED mint failed: witness-register request to ${witnessServiceUrl} timed out reading the response body after ${WITNESS_HTTP_TIMEOUT_MS}ms`);
-      }
-    }
-  } finally {
-    clearTimeout(timer);
-  }
-  if (!res.ok) {
-    throw new Error(`WITNESSED mint failed: witness-register returned HTTP ${res.status}${body && body.error ? ` — ${body.error}` : ''}`);
-  }
+    // Step 2: sign the registration attestation with the REAL owner/voucher private keys — never
+    // agent (matches REVOKE_ROLE_PUB_FIELD's established "agent never self-attests a mutation").
+    const msg = registrationAttestationMessage(badge.agent_id, badge.inception.owner_pub, badge.inception.voucher_pub);
+    const owner_sig = signB64(keys.owner.priv, msg);
+    const voucher_sig = signB64(keys.voucher.priv, msg);
 
-  // Step 4: only NOW claim WITNESSED — re-sign the whole badge core so the tier change itself is
-  // covered by the same whole-badge signature every other field already is.
-  badge.assurance_tier = 'WITNESSED';
-  return resign(badge, keys);
+    // Step 3: register with the witness service. Fail-closed — see header comment.
+    //
+    // PRIVACY NOTE (post-review disclosure fix): `inception` — including `name` and `owner_id` —
+    // is sent to the witness service IN FULL, deliberately. The server independently recomputes
+    // agent_id = hash(canonical(inception)) (viaid-witness's lib/witness.mjs registerAgent()) to
+    // bind the registration to a caller-unforgeable id; withholding any inception field would make
+    // the server's recomputed agent_id diverge from this badge's real one. There is no way to
+    // minimize this payload without changing that hash-binding protocol on the server side too
+    // (out of scope here). Only reached when the caller explicitly opts into WITNESSED tier (viaid
+    // init --witnessed) — never on the default SELF-tier mint path. Logged so this is visible at
+    // the point of action, not just in a comment.
+    console.warn(`[viaid:witness] mint: registering with ${witnessServiceUrl} — this sends the full inception object (including name, owner_id) to a third party.`);
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), WITNESS_HTTP_TIMEOUT_MS);
+    let res, body = null;
+    try {
+      try {
+        res = await fetch(`${witnessServiceUrl}/api/witness-register`, {
+          method: 'POST',
+          signal: ctrl.signal,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ inception: badge.inception, owner_sig, voucher_sig }),
+        });
+      } catch (e) {
+        throw new Error(`WITNESSED mint failed: witness-register request to ${witnessServiceUrl} errored — ${e.message}`);
+      }
+      // POST-REVIEW FIX: the body read now happens INSIDE the same timer-protected scope. Previously
+      // clearTimeout() ran right after fetch() resolved (headers only), so a response that stalled
+      // mid-body could hang this call forever. A stalled body now hits the same abort signal and
+      // fails closed, matching this function's own "fail-closed" contract.
+      try {
+        body = await res.json();
+      } catch {
+        if (ctrl.signal.aborted) {
+          throw new Error(`WITNESSED mint failed: witness-register request to ${witnessServiceUrl} timed out reading the response body after ${WITNESS_HTTP_TIMEOUT_MS}ms`);
+        }
+        // else: body stays null — no longer silently accepted, see the confirmation check below.
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+    if (!res.ok) {
+      throw new Error(`WITNESSED mint failed: witness-register returned HTTP ${res.status}${body && body.error ? ` — ${body.error}` : ''}`);
+    }
+    // POST-REVIEW FIX (4th round): an HTTP 2xx status alone used to be treated as proof of a
+    // successful registration, even with an empty/unparseable body (`body` stays `null` above),
+    // `{}` (valid JSON, confirms nothing), or an explicit in-body error signal despite the 2xx
+    // transport status. A badge minted after any of these would locally claim WITNESSED tier while
+    // the witness service may never have actually stored a record for it, silently breaking the
+    // one guarantee this tier exists to provide. `already_registered` is the field this repo's own
+    // witness-register contract always returns on genuine success (see this file's and
+    // test/cli.witnessed.test.mjs's mocks) — its absence, or an explicit error signal, is now
+    // treated as a failed registration rather than silently accepted.
+    if (!body || typeof body.already_registered !== 'boolean' || body.error || body.status === 'error') {
+      throw new Error(`WITNESSED mint failed: witness-register returned HTTP ${res.status} but did not confirm registration${body && body.error ? ` — ${body.error}` : body ? ` (got ${JSON.stringify(body)})` : ' (empty or unparseable body)'}`);
+    }
+
+    // Step 4: only NOW claim WITNESSED — re-sign the whole badge core so the tier change itself is
+    // covered by the same whole-badge signature every other field already is.
+    badge.assurance_tier = 'WITNESSED';
+    return resign(badge, keys);
+  } catch (e) {
+    removeOrphanedKeys(opts.workRoot, badge.agent_id);
+    throw e;
+  }
 }
 
 // ---- append a hash-chained log entry (viaid log) ----
@@ -348,6 +383,17 @@ export function revokeBadge(badge, workRoot, reason = 'revoked') {
   return resign(badge, loadKeys(workRoot, badge.agent_id));
 }
 
+// POST-REVIEW FIX (4th round): the same truthy-vs-type-test bug already fixed once for
+// `badge.log` (below) existed a SECOND time on `badge.evidence.confirmed_profiles`/
+// `downgraded_profiles` — `ev.confirmed_profiles || []` let a truthy non-array (e.g. `{}`) sail
+// straight through into a `.join()` call that only exists on arrays, crashing verifyBadge() for
+// ANY caller regardless of whether the rest of the badge was otherwise perfectly valid. All
+// array-shaped badge sub-fields now share this one normalizer instead of ad hoc `|| []` guards
+// repeated at each call site, so a field added later can't reintroduce the same bug by
+// copy-pasting the wrong pattern (see the general "never throws" regression test in
+// test/agentid.witnessed.test.mjs, added for the same reason).
+function asArray(value) { return Array.isArray(value) ? value : []; }
+
 // ---- verify (viaid verify / scan) → honest verdict ----
 // POST-REVIEW FIX (3rd round, caught by live CLI smoke-test rather than by review): the 2nd
 // internal-use-only parameter below defaults to false for every existing external caller
@@ -384,12 +430,12 @@ export function verifyBadge(badge, opts) {
   // POST-REVIEW FIX (4th round): `badge.log || []` is a TRUTHY test, not a type test — a
   // malformed badge with `.log` set to a non-array truthy value (e.g. `{}`) sailed through
   // unchanged and crashed the very next `.filter()`/`for...of` call ("is not a function" / "is
-  // not iterable"). Normalized ONCE here (Array.isArray, not `||`) and reused below instead of
-  // three separate `badge.log || []` guards, one of which (the rotation-entries filter) still had
-  // this exact bug. Each entry is also guarded for object-shape before being read/destructured,
-  // since a log ARRAY containing a non-object entry (e.g. `[null]`) crashed the same way one line
-  // later even after the array-vs-not check.
-  const log = Array.isArray(badge.log) ? badge.log : [];
+  // not iterable"). Normalized ONCE here via the shared asArray() helper (see its definition) and
+  // reused below instead of three separate `badge.log || []` guards, one of which (the
+  // rotation-entries filter) still had this exact bug. Each entry is also guarded for object-shape
+  // before being read/destructured, since a log ARRAY containing a non-object entry (e.g.
+  // `[null]`) crashed the same way one line later even after the array-vs-not check.
+  const log = asArray(badge.log);
 
   // 1. id integrity: recompute agent_id from the inception event.
   const recomputed = 'via_' + sha256(canonical(inc)).slice(0, 32);
@@ -486,7 +532,7 @@ export function verifyBadge(badge, opts) {
   // coverage + assurance tier — honest scope, never "everything the agent did".
   const ev = badge.evidence;
   const coverage = ev
-    ? `GraphSmith eval: ${ev.status}; confirmed profiles [${(ev.confirmed_profiles || []).join(', ') || 'none'}]`
+    ? `GraphSmith eval: ${ev.status}; confirmed profiles [${asArray(ev.confirmed_profiles).join(', ') || 'none'}]`
     : 'no evaluation attached (identity + log only)';
   const assurance_tier = badge.assurance_tier; // SELF here
   let scope_note = ev?.note
@@ -511,8 +557,8 @@ export function verifyBadge(badge, opts) {
 
   return {
     verdict, agent_id: badge.agent_id, assurance_tier, coverage, scope_note,
-    confirmed_profiles: ev?.confirmed_profiles || [],
-    downgraded_profiles: ev?.downgraded_profiles || [], // shown grey, never green
+    confirmed_profiles: asArray(ev?.confirmed_profiles),
+    downgraded_profiles: asArray(ev?.downgraded_profiles), // shown grey, never green
     key_seq: badge.key_seq ?? inc.key_seq ?? 0,
     last_rotation_reason: badge.last_rotation_reason ?? null,
     last_rotation_at: badge.last_rotation_at ?? null,
@@ -632,6 +678,20 @@ export async function verifyBadgeWitnessed(badge, opts) {
     clearTimeout(timer);
   }
 
+  // POST-REVIEW FIX (4th round, security-3/correctness-4): the response was never checked to
+  // actually be ABOUT the agent_id just queried — a caching bug, a load-balancer routing mix-up,
+  // or a buggy witness deployment ignoring the query param would previously be trusted blindly.
+  // The real contract (and this file's own test mocks, e.g. the CHECKED_REVOKED/CHECKED_CLEAN
+  // tests) always echoes `agent_id` back in the response; a missing or mismatched one is now
+  // treated the same as any other untrustworthy response — the "unexpected shape" fallback below.
+  const queriedAgentId = verdict.agent_id || badge.agent_id || '';
+  if (!body || body.agent_id !== queriedAgentId) {
+    console.warn(`[viaid:witness] verify fallback: witness service at ${url} answered for agent_id=${JSON.stringify(body && body.agent_id)}, expected ${JSON.stringify(queriedAgentId)} — refusing to trust a response for the wrong agent`);
+    return {
+      ...verdict, verdict: fallbackVerdict, witness_state: 'UNREACHABLE',
+      scope_note: `${verdict.scope_note} The online witness check returned a response that did not confirm it was answering about this agent_id — this verdict fell back to local-log-only semantics, same as a SELF-tier badge, despite being WITNESSED-tier.`,
+    };
+  }
   // POST-REVIEW FIX (2nd round): `body.witnessed === true` correctly escalates and (implicitly)
   // anything else fell through to CHECKED_CLEAN — including a malformed/unexpected response like
   // `{witnessed: "true"}` (string) or `{witnessed: 1}` (number), which strict-`=== true` correctly
@@ -640,7 +700,7 @@ export async function verifyBadgeWitnessed(badge, opts) {
   // boolean, so this only bites on a buggy/compromised/misconfigured witness endpoint — but this
   // tier's whole purpose is not trusting a single source blindly, so an unexpected shape is now
   // treated the same as an unreachable service (fail toward UNKNOWN, not toward "looks fine").
-  if (body && body.witnessed === true) {
+  if (body.witnessed === true) {
     // OR-only escalation: never downgrade an already-INVALID verdict into looking like a
     // legitimately-signed-then-revoked badge — see the function header comment for why.
     const forcedVerdict = verdict.verdict === 'INVALID' ? verdict.verdict : 'REVOKED';
@@ -649,7 +709,7 @@ export async function verifyBadgeWitnessed(badge, opts) {
       scope_note: `${verdict.scope_note} The witness service independently confirms a revocation (${body.action || 'unknown action'}) is on record for this agent_id — this holds even if the locally-presented badge's own log has been truncated to hide it, closing the SELF-tier log-truncation gap described above.`,
     };
   }
-  if (body && body.witnessed === false) {
+  if (body.witnessed === false) {
     return {
       ...verdict, witness_state: 'CHECKED_CLEAN',
       scope_note: `${verdict.scope_note} The witness service independently confirms no revocation is on record for this agent_id — unlike SELF-tier, this is not solely reliant on the locally-presented badge's own (potentially truncated) log.`,
