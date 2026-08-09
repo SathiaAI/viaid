@@ -6,6 +6,9 @@
     "viaid-skill": "scripts/install.js",
     "viaid": "bin/viaid.mjs"
   },
+  "scripts": {
+    "test": "node --test"
+  },
   "files": [
     "SKILL.md",
     "bin/",

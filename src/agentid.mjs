@@ -148,7 +148,17 @@ export function mintBadge({ name, owner = 'local-dev', workRoot, badge_ttl = DEF
 // viaid-locked/prototype/src/agentid.mjs (canonical, SAT-933/934, merged 2026-08-01). Gives
 // holders of this published package an actual path to close the SAT-958 SELF-tier gap
 // disclosed in verifyBadge()'s scope_note below — not previously available here.
-const WITNESS_HTTP_TIMEOUT_MS = Number(process.env.VIAID_WITNESS_TIMEOUT_MS || 10000);
+//
+// POST-REVIEW FIX (adversarial review, 2026-08-08): a non-numeric override (e.g. "10s") used to
+// silently collapse the timeout to ~0ms -- `Number("10s") === NaN`, and `setTimeout(fn, NaN)`
+// fires on (almost) the next tick, not after the documented 10s default. Validated here instead
+// of trusting the env var directly. Exported as a pure function so the parsing rule has a direct
+// regression test, independent of module-load env var timing.
+export function parseWitnessTimeoutMs(raw, fallbackMs = 10000) {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallbackMs;
+}
+const WITNESS_HTTP_TIMEOUT_MS = parseWitnessTimeoutMs(process.env.VIAID_WITNESS_TIMEOUT_MS);
 
 // Single swap point, per the commitment made when this shipped (2026-08-01): the only
 // production default hardcoded in this file. Once a custom domain (e.g. witness.viaid.ai) is
@@ -179,23 +189,46 @@ export async function mintWitnessedBadge(opts) {
   const voucher_sig = signB64(keys.voucher.priv, msg);
 
   // Step 3: register with the witness service. Fail-closed — see header comment.
+  //
+  // PRIVACY NOTE (post-review disclosure fix): `inception` — including `name` and `owner_id` —
+  // is sent to the witness service IN FULL, deliberately. The server independently recomputes
+  // agent_id = hash(canonical(inception)) (viaid-witness's lib/witness.mjs registerAgent()) to
+  // bind the registration to a caller-unforgeable id; withholding any inception field would make
+  // the server's recomputed agent_id diverge from this badge's real one. There is no way to
+  // minimize this payload without changing that hash-binding protocol on the server side too
+  // (out of scope here). Only reached when the caller explicitly opts into WITNESSED tier (viaid
+  // init --witnessed) — never on the default SELF-tier mint path. Logged so this is visible at
+  // the point of action, not just in a comment.
+  console.warn(`[viaid:witness] mint: registering with ${witnessServiceUrl} — this sends the full inception object (including name, owner_id) to a third party.`);
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), WITNESS_HTTP_TIMEOUT_MS);
-  let res;
+  let res, body = null;
   try {
-    res = await fetch(`${witnessServiceUrl}/api/witness-register`, {
-      method: 'POST',
-      signal: ctrl.signal,
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ inception: badge.inception, owner_sig, voucher_sig }),
-    });
-  } catch (e) {
-    throw new Error(`WITNESSED mint failed: witness-register request to ${witnessServiceUrl} errored — ${e.message}`);
+    try {
+      res = await fetch(`${witnessServiceUrl}/api/witness-register`, {
+        method: 'POST',
+        signal: ctrl.signal,
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ inception: badge.inception, owner_sig, voucher_sig }),
+      });
+    } catch (e) {
+      throw new Error(`WITNESSED mint failed: witness-register request to ${witnessServiceUrl} errored — ${e.message}`);
+    }
+    // POST-REVIEW FIX: the body read now happens INSIDE the same timer-protected scope. Previously
+    // clearTimeout() ran right after fetch() resolved (headers only), so a response that stalled
+    // mid-body could hang this call forever. A stalled body now hits the same abort signal and
+    // fails closed, matching this function's own "fail-closed" contract; a non-JSON body on an
+    // otherwise-OK response stays lenient (body just stays null), same as before.
+    try {
+      body = await res.json();
+    } catch {
+      if (ctrl.signal.aborted) {
+        throw new Error(`WITNESSED mint failed: witness-register request to ${witnessServiceUrl} timed out reading the response body after ${WITNESS_HTTP_TIMEOUT_MS}ms`);
+      }
+    }
   } finally {
     clearTimeout(timer);
   }
-  let body = null;
-  try { body = await res.json(); } catch { /* non-JSON error body — fall through with body=null */ }
   if (!res.ok) {
     throw new Error(`WITNESSED mint failed: witness-register returned HTTP ${res.status}${body && body.error ? ` — ${body.error}` : ''}`);
   }
@@ -392,6 +425,13 @@ export function verifyBadge(badge) {
   // prototype/src/agentid.mjs (canonical).
   if (assurance_tier === 'SELF') {
     scope_note += " SELF-tier revocation is not externally witnessed — a holder of this badge's raw JSON could locally suppress a revocation event, and this verifier cannot detect that.";
+  } else if (assurance_tier === 'WITNESSED') {
+    // POST-REVIEW FIX: this synchronous verifyBadge() never performs the online witness check
+    // (only verifyBadgeWitnessed() does) -- previously a WITNESSED-tier badge verified through
+    // THIS function alone got zero disclosure of that, so every pre-existing caller (e.g. the
+    // CLI's `viaid verify`, which calls verifyBadge() directly) silently got a verdict no
+    // stronger than SELF-tier while the badge itself claimed a higher tier.
+    scope_note += ' This badge claims WITNESSED tier, but this synchronous check did not perform the online witness lookup — call verifyBadgeWitnessed() to independently confirm revocation status; absent that call, this verdict relies on local-log-only semantics, same as a SELF-tier badge.';
   }
   if (compromisedSince) {
     scope_note += ` Note: a COMPROMISE_ROTATION event flags key material suspected compromised since ${compromisedSince} — log entries in that window should be discounted by the reader, not treated as trusted.`;
@@ -418,8 +458,23 @@ export function verifyBadge(badge) {
 // SELF-tier gap disclosed in verifyBadge()'s scope_note above. Ported from viaid-locked/
 // prototype/src/agentid.mjs (canonical).
 export async function verifyBadgeWitnessed(badge, { checkWitness = true, witnessServiceUrl } = {}) {
+  // POST-REVIEW FIX: the `tier` guard below used to run AFTER `verifyBadge(badge)`, so a
+  // null/non-object badge threw inside verifyBadge() before the guard was ever reached, making
+  // the guard dead code. Checked first now, and returns a verdict shape consistent with every
+  // other return path in this function (never throws for a bad `badge` argument).
+  if (!badge || typeof badge !== 'object') {
+    return {
+      verdict: 'INVALID', agent_id: undefined, assurance_tier: undefined,
+      coverage: 'no evaluation attached (identity + log only)',
+      scope_note: 'badge is missing or not an object — cannot verify.',
+      confirmed_profiles: [], downgraded_profiles: [],
+      key_seq: 0, last_rotation_reason: null, last_rotation_at: null,
+      freshness_state: 'UNKNOWN', steps: [],
+      witness_state: 'NOT_APPLICABLE',
+    };
+  }
   const verdict = verifyBadge(badge);
-  const tier = (badge && typeof badge === 'object') ? badge.assurance_tier : undefined;
+  const tier = badge.assurance_tier;
 
   if (tier !== 'WITNESSED') {
     return { ...verdict, witness_state: 'NOT_APPLICABLE' };
@@ -431,32 +486,54 @@ export async function verifyBadgeWitnessed(badge, { checkWitness = true, witness
     };
   }
 
+  // POST-REVIEW FIX: a witness-check FAILURE used to return the exact same top-level `verdict`
+  // as a genuine online confirmation would (only the easy-to-miss `witness_state` field
+  // differed) — so an attacker who could merely block network access to the witness service
+  // could force every WITNESSED verify call into the fallback path while it still read as fully
+  // verified to any caller that only checks `.verdict`. INVALID/REVOKED are already the worst
+  // realistic states and are never masked further; VALID/STALE downgrade to UNKNOWN because the
+  // one check that matters most for this tier could not be completed.
+  const fallbackVerdict = (verdict.verdict === 'INVALID' || verdict.verdict === 'REVOKED') ? verdict.verdict : 'UNKNOWN';
+
   const url = witnessServiceUrl || WITNESS_SERVICE_URL;
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), WITNESS_HTTP_TIMEOUT_MS);
-  let res;
+  let res, body;
   try {
-    res = await fetch(`${url}/api/witness-status?agent_id=${encodeURIComponent(verdict.agent_id || badge.agent_id || '')}`, { signal: ctrl.signal });
-  } catch {
-    return {
-      ...verdict, witness_state: 'UNREACHABLE',
-      scope_note: `${verdict.scope_note} The online witness check was attempted but the witness service was unreachable — this verdict fell back to local-log-only semantics, same as a SELF-tier badge, despite being WITNESSED-tier.`,
-    };
+    try {
+      res = await fetch(`${url}/api/witness-status?agent_id=${encodeURIComponent(verdict.agent_id || badge.agent_id || '')}`, { signal: ctrl.signal });
+    } catch (e) {
+      console.warn(`[viaid:witness] verify fallback: witness service unreachable at ${url} (${e.message}) — agent_id=${badge.agent_id || 'unknown'}`);
+      return {
+        ...verdict, verdict: fallbackVerdict, witness_state: 'UNREACHABLE',
+        scope_note: `${verdict.scope_note} The online witness check was attempted but the witness service was unreachable — this verdict fell back to local-log-only semantics, same as a SELF-tier badge, despite being WITNESSED-tier.`,
+      };
+    }
+    if (!res.ok) {
+      console.warn(`[viaid:witness] verify fallback: witness service returned HTTP ${res.status} at ${url} — agent_id=${badge.agent_id || 'unknown'}`);
+      return {
+        ...verdict, verdict: fallbackVerdict, witness_state: 'UNREACHABLE',
+        scope_note: `${verdict.scope_note} The online witness check was attempted but the witness service returned HTTP ${res.status} — this verdict fell back to local-log-only semantics, same as a SELF-tier badge, despite being WITNESSED-tier.`,
+      };
+    }
+    // POST-REVIEW FIX: the body read now happens INSIDE the same timer-protected try block.
+    // Previously clearTimeout() ran (in a `finally` around only the fetch() call) before this
+    // read, so a response that stalled mid-body — headers arrive, body never completes — could
+    // hang this call forever, bypassing the configured timeout entirely.
+    try {
+      body = await res.json();
+    } catch (e) {
+      const reason = ctrl.signal.aborted
+        ? `timed out reading the response body after ${WITNESS_HTTP_TIMEOUT_MS}ms`
+        : `response was not valid JSON (${e.message})`;
+      console.warn(`[viaid:witness] verify fallback: witness service at ${url} ${reason} — agent_id=${badge.agent_id || 'unknown'}`);
+      return {
+        ...verdict, verdict: fallbackVerdict, witness_state: 'UNREACHABLE',
+        scope_note: `${verdict.scope_note} The online witness check was attempted but the witness service's response ${reason} — this verdict fell back to local-log-only semantics, same as a SELF-tier badge, despite being WITNESSED-tier.`,
+      };
+    }
   } finally {
     clearTimeout(timer);
-  }
-  if (!res.ok) {
-    return {
-      ...verdict, witness_state: 'UNREACHABLE',
-      scope_note: `${verdict.scope_note} The online witness check was attempted but the witness service returned HTTP ${res.status} — this verdict fell back to local-log-only semantics, same as a SELF-tier badge, despite being WITNESSED-tier.`,
-    };
-  }
-  let body;
-  try { body = await res.json(); } catch {
-    return {
-      ...verdict, witness_state: 'UNREACHABLE',
-      scope_note: `${verdict.scope_note} The online witness check was attempted but the witness service's response was not valid JSON — this verdict fell back to local-log-only semantics, same as a SELF-tier badge, despite being WITNESSED-tier.`,
-    };
   }
 
   if (body && body.witnessed === true) {
