@@ -87,13 +87,20 @@ function loadKeys(root, agentId) {
 }
 // POST-REVIEW FIX (4th round): best-effort cleanup for mintWitnessedBadge()'s rollback path
 // below — never let a cleanup failure mask the original, more important error that triggered it.
+//
+// POST-REVIEW FIX (5th round, reliability-3): a cleanup failure other than ENOENT used to be
+// logged via console.warn and then fully discarded — the caller had no programmatic way to know
+// private key material might still be sitting on disk. Now returns the cleanup error (or null on
+// success/nothing-to-clean-up) so the caller can attach it to the error it's already throwing,
+// without changing what that original error's own message/code is.
 function removeOrphanedKeys(root, agentId) {
   try {
     unlinkSync(keystorePath(root, agentId));
+    return null;
   } catch (e) {
-    if (e.code !== 'ENOENT') {
-      console.warn(`[viaid:witness] mint failed AND could not clean up the orphaned keystore file for ${agentId} — ${e.message}`);
-    }
+    if (e.code === 'ENOENT') return null; // nothing was ever there to clean up — not a failure
+    console.warn(`[viaid:witness] mint failed AND could not clean up the orphaned keystore file for ${agentId} — ${e.message}`);
+    return e;
   }
 }
 
@@ -217,19 +224,31 @@ export async function mintWitnessedBadge(opts) {
   const witnessServiceUrl = (opts && opts.witnessServiceUrl) || WITNESS_SERVICE_URL;
   assertSafeWitnessUrl(witnessServiceUrl); // fail before doing any work, not after minting
 
-  // Step 1: mint exactly as SELF-tier, via the existing unchanged path — same inception, same
-  // agent_id derivation, same keystore write. No new failure surface introduced here.
-  const badge = mintBadge(opts);
-  const keys = loadKeys(opts.workRoot, badge.agent_id);
-
-  // POST-REVIEW FIX (4th round): everything from here on can fail (network error, non-2xx,
-  // unconfirmed body, timeout) AFTER step 1 has already written real owner/agent/voucher/
-  // next-agent PRIVATE KEY material to workRoot/.keys/<agent_id>.json. Previously, any failure
-  // below left that keystore file orphaned on disk forever — referenced by no badge (the CLI only
-  // ever calls saveBadge() once this function returns successfully), with no command to find or
-  // clean it up. Every retry during a witness-service outage silently left another one behind.
-  // Wrapped so any failure below rolls that keystore file back before propagating the real error.
+  // POST-REVIEW FIX (5th round, correctness-2 / data_privacy-F1 / SEC-004 — found independently
+  // by three reviewers in the round-5 adversarial review): mintBadge() and loadKeys() now run
+  // INSIDE the try block below, not before it. Previously they ran before the try, so if
+  // loadKeys() threw right after mintBadge() succeeded (e.g. a transient fs error, or a
+  // concurrent process racing the keystore write mintBadge()'s internal saveKeys() call had just
+  // performed), the catch below was unreachable for that specific failure and the just-written
+  // private-key material was never rolled back by removeOrphanedKeys(). `badge` is declared here
+  // with `let` so the catch can still reach it for cleanup if it was assigned before the
+  // failure, and correctly skip cleanup (there is nothing to orphan) if mintBadge() itself never
+  // returned at all.
+  let badge;
   try {
+    // Step 1: mint exactly as SELF-tier, via the existing unchanged path — same inception, same
+    // agent_id derivation, same keystore write. No new failure surface introduced here.
+    badge = mintBadge(opts);
+    const keys = loadKeys(opts.workRoot, badge.agent_id);
+
+    // POST-REVIEW FIX (4th round): everything from here on can fail (network error, non-2xx,
+    // unconfirmed body, timeout) AFTER step 1 has already written real owner/agent/voucher/
+    // next-agent PRIVATE KEY material to workRoot/.keys/<agent_id>.json. Previously, any failure
+    // below left that keystore file orphaned on disk forever — referenced by no badge (the CLI
+    // only ever calls saveBadge() once this function returns successfully), with no command to
+    // find or clean it up. Every retry during a witness-service outage silently left another one
+    // behind. Wrapped (now including step 1 above too, see 5th-round comment) so any failure
+    // below rolls that keystore file back before propagating the real error.
     // Step 2: sign the registration attestation with the REAL owner/voucher private keys — never
     // agent (matches REVOKE_ROLE_PUB_FIELD's established "agent never self-attests a mutation").
     const msg = registrationAttestationMessage(badge.agent_id, badge.inception.owner_pub, badge.inception.voucher_pub);
@@ -256,6 +275,13 @@ export async function mintWitnessedBadge(opts) {
         res = await fetch(`${witnessServiceUrl}/api/witness-register`, {
           method: 'POST',
           signal: ctrl.signal,
+          // POST-REVIEW FIX (5th round, SEC-002): fetch() follows redirects by default with no
+          // scheme re-validation on the target — a redirect from this HTTPS endpoint to an
+          // http:// target would silently defeat assertSafeWitnessUrl()'s plaintext protection
+          // above. 'manual' turns a redirect into an opaqueredirect response (status 0, !ok)
+          // instead of following it, which the existing `!res.ok` fail-closed check below then
+          // correctly rejects — no attacker-controlled destination is ever contacted.
+          redirect: 'manual',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ inception: badge.inception, owner_sig, voucher_sig }),
         });
@@ -298,7 +324,21 @@ export async function mintWitnessedBadge(opts) {
     badge.assurance_tier = 'WITNESSED';
     return resign(badge, keys);
   } catch (e) {
-    removeOrphanedKeys(opts.workRoot, badge.agent_id);
+    // POST-REVIEW FIX (5th round): `badge` may now be unassigned if mintBadge() itself threw
+    // before ever producing an agent_id (e.g. invalid opts) — nothing was written to the
+    // keystore in that case, so there is nothing to clean up and calling removeOrphanedKeys()
+    // with an undefined agent_id would just be a wasted (harmless, ENOENT) unlink attempt.
+    if (badge && badge.agent_id) {
+      // POST-REVIEW FIX (5th round, reliability-3): if cleanup ALSO fails, annotate the original
+      // error rather than silently swallowing the cleanup failure — `e` stays the same object
+      // (same message, same code, same identity for any existing `instanceof`/regex/code check),
+      // just with two extra properties a caller can opt into inspecting.
+      const cleanupError = removeOrphanedKeys(opts.workRoot, badge.agent_id);
+      if (cleanupError) {
+        e.keystoreCleanupFailed = true;
+        e.keystoreCleanupError = cleanupError;
+      }
+    }
     throw e;
   }
 }
@@ -643,7 +683,12 @@ export async function verifyBadgeWitnessed(badge, opts) {
   let res, body;
   try {
     try {
-      res = await fetch(`${url}/api/witness-status?agent_id=${encodeURIComponent(verdict.agent_id || badge.agent_id || '')}`, { signal: ctrl.signal });
+      // POST-REVIEW FIX (5th round, SEC-002): see the matching comment on the witness-register
+      // fetch() in mintWitnessedBadge() above — 'manual' prevents a redirect from silently
+      // downgrading this request to plaintext; the `!res.ok` check just below fails closed on
+      // the resulting opaqueredirect response the same way it already does for any other
+      // non-2xx response.
+      res = await fetch(`${url}/api/witness-status?agent_id=${encodeURIComponent(verdict.agent_id || badge.agent_id || '')}`, { signal: ctrl.signal, redirect: 'manual' });
     } catch (e) {
       console.warn(`[viaid:witness] verify fallback: witness service unreachable at ${url} (${e.message}) — agent_id=${badge.agent_id || 'unknown'}`);
       return {
