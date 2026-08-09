@@ -9,7 +9,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -29,8 +29,13 @@ function startMockWitness({ witnessed = false } = {}) {
       return;
     }
     if (req.method === 'GET' && req.url.startsWith('/api/witness-status')) {
+      // POST-REVIEW FIX (4th round): the real contract echoes `agent_id` back in the response so
+      // the caller can confirm it got an answer about the agent it actually queried (see
+      // src/agentid.mjs's verifyBadgeWitnessed() agent_id-matching check) — this mock now does
+      // the same instead of always answering generically, which would fail that check.
+      const agentId = new URL(req.url, 'http://127.0.0.1').searchParams.get('agent_id') || '';
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ witnessed }));
+      res.end(JSON.stringify({ agent_id: agentId, witnessed }));
       return;
     }
     res.writeHead(404, { 'content-type': 'application/json' });
@@ -91,6 +96,52 @@ test('CLI: init --witnessed / verify / scan actually talk to the witness service
       calls.filter((c) => c.startsWith('GET /api/witness-status')).length >= 2,
       `expected 2 witness-status calls (verify + scan); calls seen: ${calls.join(', ') || '(none)'}`,
     );
+  } finally {
+    server.close();
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+// POST-REVIEW FIX (4th round, correctness-1): `init([name = 'my-agent', ...flags])` treated argv
+// position 0 as the name unconditionally, so `--witnessed` appearing BEFORE (or instead of) a
+// name argument was never recognized as a flag at all — it silently became the badge's `name`
+// while the real name (if any) was discarded and the badge minted at SELF tier with no error. The
+// test above already covers the one ordering that happened to work (name then flag); these two
+// cover the two that didn't.
+test('CLI: init --witnessed (no explicit name) still mints WITNESSED tier, not a SELF-tier badge literally named "--witnessed"', async () => {
+  const { server, calls, port } = await startMockWitness({ witnessed: false });
+  const work = mkdtempSync(join(tmpdir(), 'viaid-cli-test-'));
+  try {
+    const env = { ...process.env, VIAID_WORK: work, VIAID_WITNESS_URL: `http://127.0.0.1:${port}`, VIAID_WITNESS_TIMEOUT_MS: '3000' };
+    const init = await runCli(['init', '--witnessed'], env);
+    assert.equal(init.code, 0, `init --witnessed exited nonzero: ${init.stderr}`);
+    assert.match(init.stdout, /tier=WITNESSED/, 'flag-before-name (here: no name at all) must still mint WITNESSED tier');
+    assert.ok(
+      calls.some((c) => c.startsWith('POST /api/witness-register')),
+      `expected a witness-register call; calls seen: ${calls.join(', ') || '(none)'}`,
+    );
+    const idMatch = init.stdout.match(/via_[a-f0-9]+/);
+    assert.ok(idMatch, `no agent_id found in init output: ${init.stdout}`);
+    const badge = JSON.parse(readFileSync(join(work, `${idMatch[0]}.badge.json`), 'utf8'));
+    assert.equal(badge.inception.name, 'my-agent', 'omitting the name entirely should fall back to the documented default, not literally become "--witnessed"');
+  } finally {
+    server.close();
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test('CLI: init --witnessed my-named-agent (flag before an explicit name) mints WITNESSED tier and keeps the given name', async () => {
+  const { server, port } = await startMockWitness({ witnessed: false });
+  const work = mkdtempSync(join(tmpdir(), 'viaid-cli-test-'));
+  try {
+    const env = { ...process.env, VIAID_WORK: work, VIAID_WITNESS_URL: `http://127.0.0.1:${port}`, VIAID_WITNESS_TIMEOUT_MS: '3000' };
+    const init = await runCli(['init', '--witnessed', 'my-named-agent'], env);
+    assert.equal(init.code, 0, `init exited nonzero: ${init.stderr}`);
+    assert.match(init.stdout, /tier=WITNESSED/);
+    const idMatch = init.stdout.match(/via_[a-f0-9]+/);
+    assert.ok(idMatch, `no agent_id found in init output: ${init.stdout}`);
+    const badge = JSON.parse(readFileSync(join(work, `${idMatch[0]}.badge.json`), 'utf8'));
+    assert.equal(badge.inception.name, 'my-named-agent', 'the explicit name must survive, not be swallowed by the flag');
   } finally {
     server.close();
     rmSync(work, { recursive: true, force: true });
