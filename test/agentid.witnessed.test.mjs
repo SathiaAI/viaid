@@ -357,8 +357,14 @@ test('mintWitnessedBadge throws a clear error on a non-OK registration response'
 
 // A malformed badge (object-shaped but missing/empty `.log`) crashed verifyBadge()'s hash-chain
 // walk with "undefined is not iterable" instead of surfacing as an INVALID verdict.
+//
+// POST-REVIEW FIX (3rd review round, 4th fix round): `.log` present but the WRONG shape (a
+// non-array truthy value, or an array containing a non-object entry) crashed the same way one
+// step earlier/later than the missing-`.log` case above — `badge.log || []` is a truthy test,
+// not a type test, so `{}` sailed through unchanged into a `.filter()`/`for...of` that can't
+// accept it, and `[null]` passed the array check but broke on destructuring the null entry.
 test('verifyBadge / verifyBadgeWitnessed do not crash on a malformed but object-shaped badge', () => {
-  for (const malformed of [{}, [], { assurance_tier: 'WITNESSED', inception: {} }]) {
+  for (const malformed of [{}, [], { assurance_tier: 'WITNESSED', inception: {} }, { log: {} }, { log: [null] }, { log: ['not-an-object'] }]) {
     assert.doesNotThrow(() => aid.verifyBadge(malformed));
     const v = aid.verifyBadge(malformed);
     assert.equal(v.verdict, 'INVALID');
@@ -366,9 +372,36 @@ test('verifyBadge / verifyBadgeWitnessed do not crash on a malformed but object-
 });
 
 test('verifyBadgeWitnessed does not crash on a malformed but object-shaped badge', async () => {
-  for (const malformed of [{}, [], { assurance_tier: 'WITNESSED', inception: {} }]) {
+  for (const malformed of [{}, [], { assurance_tier: 'WITNESSED', inception: {} }, { log: {} }, { log: [null] }]) {
     const v = await aid.verifyBadgeWitnessed(malformed);
     assert.equal(v.verdict, 'INVALID');
+  }
+});
+
+// POST-REVIEW FIX (3rd review round, 4th fix round): plain verifyBadge() threw on a null/
+// undefined/non-object `badge`, and separately crashed on an explicit `null` second argument
+// (default-parameter destructuring only covers `undefined`) -- the exact same two bug classes
+// already fixed on verifyBadgeWitnessed(), never mirrored onto this function itself.
+// verifyBadgeWitnessed()'s OWN null-guard exists specifically because calling verifyBadge()
+// directly with a bad badge used to throw (see the comment there) -- that guard protected
+// verifyBadgeWitnessed()'s callers but never fixed verifyBadge() for its OTHER callers (the CLI,
+// or any library consumer calling it directly), which is what this test pins down.
+test('verifyBadge(null/undefined/non-object) returns INVALID instead of throwing', () => {
+  for (const bad of [null, undefined, 'not-a-badge', 42, true]) {
+    assert.doesNotThrow(() => aid.verifyBadge(bad), `verifyBadge(${JSON.stringify(bad)}) should not throw`);
+    const v = aid.verifyBadge(bad);
+    assert.equal(v.verdict, 'INVALID');
+  }
+});
+
+test('verifyBadge(validBadge, null) does not crash', () => {
+  const root = tmpRoot();
+  try {
+    const badge = aid.mintBadge({ name: 'a', workRoot: root });
+    assert.doesNotThrow(() => aid.verifyBadge(badge, null));
+    assert.equal(aid.verifyBadge(badge, null).verdict, 'VALID');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

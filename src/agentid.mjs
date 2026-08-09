@@ -357,10 +357,39 @@ export function revokeBadge(badge, workRoot, reason = 'revoked') {
 // outcome. See the call site in verifyBadgeWitnessed() for why leaving it in produced
 // self-contradictory text like "...did not perform the online witness lookup... The witness
 // service independently confirms no revocation is on record...".
-export function verifyBadge(badge, { _witnessedDisclosureHandledByCaller = false } = {}) {
+export function verifyBadge(badge, opts) {
+  // POST-REVIEW FIX (4th round): two crash bugs, same class as ones already fixed elsewhere in
+  // this file but never mirrored onto this function specifically:
+  //  (a) this function threw on a null/undefined `badge` instead of returning a verdict — in
+  //      fact verifyBadgeWitnessed()'s OWN null-guard above exists specifically because calling
+  //      this function with a bad badge used to throw (see its comment); the workaround there
+  //      never fixed the root cause here, so any OTHER caller (the CLI, or a library consumer)
+  //      calling verifyBadge() directly on a null/malformed badge still crashed.
+  //  (b) `{ ... } = {}` default-parameter destructuring only applies to `undefined`, not an
+  //      explicit `null` second argument — same bug already fixed on verifyBadgeWitnessed().
+  const { _witnessedDisclosureHandledByCaller = false } = opts || {};
+  if (!badge || typeof badge !== 'object') {
+    return {
+      verdict: 'INVALID', agent_id: undefined, assurance_tier: undefined,
+      coverage: 'no evaluation attached (identity + log only)',
+      scope_note: 'badge is missing or not an object — cannot verify.',
+      confirmed_profiles: [], downgraded_profiles: [],
+      key_seq: 0, last_rotation_reason: null, last_rotation_at: null,
+      freshness_state: 'UNKNOWN', steps: [],
+    };
+  }
   const steps = [];
   const push = (step, ok, detail) => steps.push({ step, status: ok ? 'PASS' : 'FAIL', detail });
   const inc = badge.inception || {};
+  // POST-REVIEW FIX (4th round): `badge.log || []` is a TRUTHY test, not a type test — a
+  // malformed badge with `.log` set to a non-array truthy value (e.g. `{}`) sailed through
+  // unchanged and crashed the very next `.filter()`/`for...of` call ("is not a function" / "is
+  // not iterable"). Normalized ONCE here (Array.isArray, not `||`) and reused below instead of
+  // three separate `badge.log || []` guards, one of which (the rotation-entries filter) still had
+  // this exact bug. Each entry is also guarded for object-shape before being read/destructured,
+  // since a log ARRAY containing a non-object entry (e.g. `[null]`) crashed the same way one line
+  // later even after the array-vs-not check.
+  const log = Array.isArray(badge.log) ? badge.log : [];
 
   // 1. id integrity: recompute agent_id from the inception event.
   const recomputed = 'via_' + sha256(canonical(inc)).slice(0, 32);
@@ -380,7 +409,7 @@ export function verifyBadge(badge, { _witnessedDisclosureHandledByCaller = false
   let currentKey = inc.agent_pub;
   let rotationChainOk = true;
   let compromisedSince = null;
-  const rotationEntries = (badge.log || []).filter((e) => e.action === 'ROTATION' || e.action === 'COMPROMISE_ROTATION');
+  const rotationEntries = log.filter((e) => e && (e.action === 'ROTATION' || e.action === 'COMPROMISE_ROTATION'));
   for (const e of rotationEntries) {
     const d = e.detail || {};
     const attestationOk = verifyB64(inc.voucher_pub, canonical(d), e.voucher_attestation || '');
@@ -418,18 +447,20 @@ export function verifyBadge(badge, { _witnessedDisclosureHandledByCaller = false
   } catch (e) { sigOk = false; push('signatures', false, e.message); }
 
   // 4. hash-chain of the log (tamper-evident) — covers rotation entries too (generic over body).
-  // POST-REVIEW FIX (2nd round): `badge.log` was iterated directly with no fallback, unlike every
-  // other optional-field read in this function (`badge.keys?.`, `(badge.log || []).filter(...)`
-  // above) — a malformed/incomplete badge object (missing `.log` entirely, e.g. `{}` or `[]`)
-  // crashed with "undefined is not iterable" instead of surfacing as an INVALID verdict.
+  // POST-REVIEW FIX (2nd round): `badge.log` was iterated directly with no fallback (missing
+  // `.log` entirely, e.g. `{}` or `[]`, crashed with "undefined is not iterable"). POST-REVIEW FIX
+  // (4th round): the `|| []` fallback used above only caught a MISSING log, not a present-but-
+  // wrong-shape one — `log` (computed above) is now type-checked once, and each entry is checked
+  // for object-shape before being destructured, since a `[null]` log crashed here too.
   let chainOk = true, prev = 'GENESIS';
-  for (const e of badge.log || []) {
+  for (const e of log) {
+    if (!e || typeof e !== 'object') { chainOk = false; break; }
     const { entry_hash, ...body } = e;
     const expect = sha256(prev + '\n' + canonical(body));
     if (expect !== entry_hash || body.prev_hash !== prev) { chainOk = false; break; }
     prev = entry_hash;
   }
-  push('log hash-chain intact', chainOk, `${(badge.log || []).length} entries`);
+  push('log hash-chain intact', chainOk, `${log.length} entries`);
 
   // 5. offline freshness/revocation state. `revocation_state` is a STORED assertion (only ever
   // FRESH or REVOKED — an issuer explicitly revokes). STALE/UNKNOWN are COMPUTED at verify time:
