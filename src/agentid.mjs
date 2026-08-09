@@ -154,9 +154,17 @@ export function mintBadge({ name, owner = 'local-dev', workRoot, badge_ttl = DEF
 // fires on (almost) the next tick, not after the documented 10s default. Validated here instead
 // of trusting the env var directly. Exported as a pure function so the parsing rule has a direct
 // regression test, independent of module-load env var timing.
+//
+// POST-REVIEW FIX (2nd round): an *oversized* override (e.g. a typo'd extra zero) had the exact
+// same silent-collapse failure mode from the OTHER direction -- Node's setTimeout silently clamps
+// any delay above 2^31-1ms (~24.8 days) down to ~1ms rather than erroring, so a value like
+// "9999999999" passed the original validation (finite, positive) and still collapsed to an
+// effectively-zero timeout. Capped at a generous-but-sane 5 minutes for an HTTP request timeout --
+// well under Node's hard clamp, and long enough that no legitimate caller needs more.
+const MAX_WITNESS_HTTP_TIMEOUT_MS = 5 * 60 * 1000;
 export function parseWitnessTimeoutMs(raw, fallbackMs = 10000) {
   const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallbackMs;
+  return Number.isFinite(parsed) && parsed > 0 && parsed <= MAX_WITNESS_HTTP_TIMEOUT_MS ? parsed : fallbackMs;
 }
 const WITNESS_HTTP_TIMEOUT_MS = parseWitnessTimeoutMs(process.env.VIAID_WITNESS_TIMEOUT_MS);
 
@@ -164,6 +172,26 @@ const WITNESS_HTTP_TIMEOUT_MS = parseWitnessTimeoutMs(process.env.VIAID_WITNESS_
 // production default hardcoded in this file. Once a custom domain (e.g. witness.viaid.ai) is
 // live, change ONLY this line (or set VIAID_WITNESS_URL) — nothing else here needs to change.
 const WITNESS_SERVICE_URL = process.env.VIAID_WITNESS_URL || 'https://witness.viaid.ai';
+
+// POST-REVIEW FIX (2nd round): no scheme was ever checked on the witness service URL -- an
+// http:// override (env var typo, stale example copy-pasted from docs) would silently send real
+// owner_sig/voucher_sig signatures and the full inception object (name, owner_id, public keys)
+// over plaintext, MITM-able. http:// stays allowed only for localhost/127.0.0.1/::1 (the
+// standard "point this at a local dev server" convention, and what this repo's own tests use);
+// everything else must be https:.
+const WITNESS_URL_LOCAL_HOSTNAMES = new Set(['localhost', '127.0.0.1', '::1']);
+function assertSafeWitnessUrl(url) {
+  let parsed;
+  try { parsed = new URL(url); } catch {
+    throw new Error(`invalid witness service URL "${url}"`);
+  }
+  const isSafe = parsed.protocol === 'https:'
+    || (parsed.protocol === 'http:' && WITNESS_URL_LOCAL_HOSTNAMES.has(parsed.hostname));
+  if (!isSafe) {
+    throw new Error(`refusing non-HTTPS witness service URL "${url}" — only https:, or http: to localhost/127.0.0.1 for local development, are allowed here (this call would otherwise send signed registration data or revocation queries over plaintext)`);
+  }
+  return url;
+}
 
 // Mirrors viaid-witness's lib/witness.mjs `registrationAttestationMessage(agent_id, owner_pub,
 // voucher_pub)` BYTE FOR BYTE — same canonical() algorithm (this file's canonical() is the same
@@ -176,6 +204,7 @@ function registrationAttestationMessage(agentId, ownerPub, voucherPub) {
 
 export async function mintWitnessedBadge(opts) {
   const witnessServiceUrl = (opts && opts.witnessServiceUrl) || WITNESS_SERVICE_URL;
+  assertSafeWitnessUrl(witnessServiceUrl); // fail before doing any work, not after minting
 
   // Step 1: mint exactly as SELF-tier, via the existing unchanged path — same inception, same
   // agent_id derivation, same keystore write. No new failure surface introduced here.
@@ -320,7 +349,15 @@ export function revokeBadge(badge, workRoot, reason = 'revoked') {
 }
 
 // ---- verify (viaid verify / scan) → honest verdict ----
-export function verifyBadge(badge) {
+// POST-REVIEW FIX (3rd round, caught by live CLI smoke-test rather than by review): the 2nd
+// internal-use-only parameter below defaults to false for every existing external caller
+// (verifyBadge(badge) is unchanged) — it exists solely so verifyBadgeWitnessed() below can ask
+// this function for the base verdict WITHOUT the "did not perform the online witness lookup"
+// sentence, which verifyBadgeWitnessed() is about to immediately supersede with the real
+// outcome. See the call site in verifyBadgeWitnessed() for why leaving it in produced
+// self-contradictory text like "...did not perform the online witness lookup... The witness
+// service independently confirms no revocation is on record...".
+export function verifyBadge(badge, { _witnessedDisclosureHandledByCaller = false } = {}) {
   const steps = [];
   const push = (step, ok, detail) => steps.push({ step, status: ok ? 'PASS' : 'FAIL', detail });
   const inc = badge.inception || {};
@@ -381,14 +418,18 @@ export function verifyBadge(badge) {
   } catch (e) { sigOk = false; push('signatures', false, e.message); }
 
   // 4. hash-chain of the log (tamper-evident) — covers rotation entries too (generic over body).
+  // POST-REVIEW FIX (2nd round): `badge.log` was iterated directly with no fallback, unlike every
+  // other optional-field read in this function (`badge.keys?.`, `(badge.log || []).filter(...)`
+  // above) — a malformed/incomplete badge object (missing `.log` entirely, e.g. `{}` or `[]`)
+  // crashed with "undefined is not iterable" instead of surfacing as an INVALID verdict.
   let chainOk = true, prev = 'GENESIS';
-  for (const e of badge.log) {
+  for (const e of badge.log || []) {
     const { entry_hash, ...body } = e;
     const expect = sha256(prev + '\n' + canonical(body));
     if (expect !== entry_hash || body.prev_hash !== prev) { chainOk = false; break; }
     prev = entry_hash;
   }
-  push('log hash-chain intact', chainOk, `${badge.log.length} entries`);
+  push('log hash-chain intact', chainOk, `${(badge.log || []).length} entries`);
 
   // 5. offline freshness/revocation state. `revocation_state` is a STORED assertion (only ever
   // FRESH or REVOKED — an issuer explicitly revokes). STALE/UNKNOWN are COMPUTED at verify time:
@@ -425,7 +466,7 @@ export function verifyBadge(badge) {
   // prototype/src/agentid.mjs (canonical).
   if (assurance_tier === 'SELF') {
     scope_note += " SELF-tier revocation is not externally witnessed — a holder of this badge's raw JSON could locally suppress a revocation event, and this verifier cannot detect that.";
-  } else if (assurance_tier === 'WITNESSED') {
+  } else if (assurance_tier === 'WITNESSED' && !_witnessedDisclosureHandledByCaller) {
     // POST-REVIEW FIX: this synchronous verifyBadge() never performs the online witness check
     // (only verifyBadgeWitnessed() does) -- previously a WITNESSED-tier badge verified through
     // THIS function alone got zero disclosure of that, so every pre-existing caller (e.g. the
@@ -457,7 +498,12 @@ export function verifyBadge(badge) {
 // locally-doctored (truncated) log copy cannot spoof — this is what actually closes the
 // SELF-tier gap disclosed in verifyBadge()'s scope_note above. Ported from viaid-locked/
 // prototype/src/agentid.mjs (canonical).
-export async function verifyBadgeWitnessed(badge, { checkWitness = true, witnessServiceUrl } = {}) {
+export async function verifyBadgeWitnessed(badge, opts) {
+  // POST-REVIEW FIX (2nd round): default-parameter destructuring (`{ ... } = {}`) only kicks in
+  // for `undefined`, NOT `null` — `verifyBadgeWitnessed(badge, null)` crashed on
+  // "Cannot destructure property 'checkWitness' of 'null'" before even reaching the badge guard
+  // below. Normalized here instead, so both an omitted and an explicit-null options argument work.
+  const { checkWitness = true, witnessServiceUrl } = opts || {};
   // POST-REVIEW FIX: the `tier` guard below used to run AFTER `verifyBadge(badge)`, so a
   // null/non-object badge threw inside verifyBadge() before the guard was ever reached, making
   // the guard dead code. Checked first now, and returns a verdict shape consistent with every
@@ -473,7 +519,12 @@ export async function verifyBadgeWitnessed(badge, { checkWitness = true, witness
       witness_state: 'NOT_APPLICABLE',
     };
   }
-  const verdict = verifyBadge(badge);
+  // _witnessedDisclosureHandledByCaller: true — every return path below (SKIPPED/UNREACHABLE/
+  // CHECKED_REVOKED/CHECKED_CLEAN) appends its own precise, accurate account of what the online
+  // check actually did; the generic "did not perform the online witness lookup" sentence
+  // verifyBadge() would otherwise add is stale the instant that check runs, and self-
+  // contradictory once it succeeds (see the POST-REVIEW FIX comment on verifyBadge() above).
+  const verdict = verifyBadge(badge, { _witnessedDisclosureHandledByCaller: true });
   const tier = badge.assurance_tier;
 
   if (tier !== 'WITNESSED') {
@@ -496,6 +547,20 @@ export async function verifyBadgeWitnessed(badge, { checkWitness = true, witness
   const fallbackVerdict = (verdict.verdict === 'INVALID' || verdict.verdict === 'REVOKED') ? verdict.verdict : 'UNKNOWN';
 
   const url = witnessServiceUrl || WITNESS_SERVICE_URL;
+  // POST-REVIEW FIX (2nd round): no scheme was checked here either — same plaintext-exposure risk
+  // as mintWitnessedBadge(), but verify()'s established contract is "never throw, always return a
+  // verdict" (see the badge-shape guard above), so an unsafe URL is treated as just another
+  // UNREACHABLE-equivalent fallback rather than a thrown exception, and the network call is never
+  // attempted at all.
+  try {
+    assertSafeWitnessUrl(url);
+  } catch (e) {
+    console.warn(`[viaid:witness] verify fallback: ${e.message}`);
+    return {
+      ...verdict, verdict: fallbackVerdict, witness_state: 'UNREACHABLE',
+      scope_note: `${verdict.scope_note} The online witness check was skipped — ${e.message} — this verdict fell back to local-log-only semantics, same as a SELF-tier badge, despite being WITNESSED-tier.`,
+    };
+  }
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), WITNESS_HTTP_TIMEOUT_MS);
   let res, body;
@@ -536,6 +601,14 @@ export async function verifyBadgeWitnessed(badge, { checkWitness = true, witness
     clearTimeout(timer);
   }
 
+  // POST-REVIEW FIX (2nd round): `body.witnessed === true` correctly escalates and (implicitly)
+  // anything else fell through to CHECKED_CLEAN — including a malformed/unexpected response like
+  // `{witnessed: "true"}` (string) or `{witnessed: 1}` (number), which strict-`=== true` correctly
+  // does NOT match, but which then silently read as a confirmed-clean verdict rather than an
+  // ambiguous one. The real service (viaid-witness's getStatus()) only ever returns a genuine JS
+  // boolean, so this only bites on a buggy/compromised/misconfigured witness endpoint — but this
+  // tier's whole purpose is not trusting a single source blindly, so an unexpected shape is now
+  // treated the same as an unreachable service (fail toward UNKNOWN, not toward "looks fine").
   if (body && body.witnessed === true) {
     // OR-only escalation: never downgrade an already-INVALID verdict into looking like a
     // legitimately-signed-then-revoked badge — see the function header comment for why.
@@ -545,9 +618,16 @@ export async function verifyBadgeWitnessed(badge, { checkWitness = true, witness
       scope_note: `${verdict.scope_note} The witness service independently confirms a revocation (${body.action || 'unknown action'}) is on record for this agent_id — this holds even if the locally-presented badge's own log has been truncated to hide it, closing the SELF-tier log-truncation gap described above.`,
     };
   }
+  if (body && body.witnessed === false) {
+    return {
+      ...verdict, witness_state: 'CHECKED_CLEAN',
+      scope_note: `${verdict.scope_note} The witness service independently confirms no revocation is on record for this agent_id — unlike SELF-tier, this is not solely reliant on the locally-presented badge's own (potentially truncated) log.`,
+    };
+  }
+  console.warn(`[viaid:witness] verify fallback: witness service at ${url} returned an unexpected response shape (witnessed=${JSON.stringify(body && body.witnessed)}, expected a boolean) — agent_id=${badge.agent_id || 'unknown'}`);
   return {
-    ...verdict, witness_state: 'CHECKED_CLEAN',
-    scope_note: `${verdict.scope_note} The witness service independently confirms no revocation is on record for this agent_id — unlike SELF-tier, this is not solely reliant on the locally-presented badge's own (potentially truncated) log.`,
+    ...verdict, verdict: fallbackVerdict, witness_state: 'UNREACHABLE',
+    scope_note: `${verdict.scope_note} The online witness check returned an unexpected response shape (not a boolean \`witnessed\` field) — this verdict fell back to local-log-only semantics, same as a SELF-tier badge, despite being WITNESSED-tier.`,
   };
 }
 

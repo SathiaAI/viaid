@@ -248,6 +248,10 @@ test('verifyBadgeWitnessed reports CHECKED_REVOKED and forces verdict=REVOKED wh
     assert.equal(result.witness_state, 'CHECKED_REVOKED');
     assert.equal(result.verdict, 'REVOKED');
     assert.match(result.scope_note, /OWNER_REVOKE/);
+    // POST-REVIEW FIX (3rd round): scope_note used to still carry verifyBadge()'s "did not
+    // perform the online witness lookup" sentence even after the lookup ran and came back
+    // positive — directly contradicting the sentence right after it. Caught by CLI smoke-test.
+    assert.doesNotMatch(result.scope_note, /did not perform the online witness lookup/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -263,6 +267,11 @@ test('verifyBadgeWitnessed reports CHECKED_CLEAN and leaves verdict unchanged wh
     );
     assert.equal(result.witness_state, 'CHECKED_CLEAN');
     assert.equal(result.verdict, 'VALID');
+    // POST-REVIEW FIX (3rd round): same stale-disclosure bug as the CHECKED_REVOKED case above —
+    // "did not perform the online witness lookup" immediately followed by "The witness service
+    // independently confirms no revocation is on record" read as self-contradictory.
+    assert.doesNotMatch(result.scope_note, /did not perform the online witness lookup/);
+    assert.match(result.scope_note, /independently confirms no revocation/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -296,6 +305,10 @@ test('verifyBadgeWitnessed with checkWitness:false is SKIPPED and never calls fe
     assert.equal(result.witness_state, 'SKIPPED');
     assert.equal(result.verdict, 'VALID');
     assert.equal(fetchCalled, false);
+    // POST-REVIEW FIX (3rd round): same fix as CHECKED_CLEAN/CHECKED_REVOKED above, covering the
+    // fallback-path family (SKIPPED/UNREACHABLE) that previously also re-stated the now-superseded
+    // "did not perform the online witness lookup" sentence redundantly alongside their own text.
+    assert.doesNotMatch(result.scope_note, /did not perform the online witness lookup/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -335,4 +348,110 @@ test('mintWitnessedBadge throws a clear error on a non-OK registration response'
     /witness-register returned HTTP 409/,
   );
   rmSync(root, { recursive: true, force: true });
+});
+
+// ============================================================================================
+// Second-round findings (from the re-review of the first fix commit) below. Each is anchored to
+// one specific finding from that re-review, same pattern as above.
+// ============================================================================================
+
+// A malformed badge (object-shaped but missing/empty `.log`) crashed verifyBadge()'s hash-chain
+// walk with "undefined is not iterable" instead of surfacing as an INVALID verdict.
+test('verifyBadge / verifyBadgeWitnessed do not crash on a malformed but object-shaped badge', () => {
+  for (const malformed of [{}, [], { assurance_tier: 'WITNESSED', inception: {} }]) {
+    assert.doesNotThrow(() => aid.verifyBadge(malformed));
+    const v = aid.verifyBadge(malformed);
+    assert.equal(v.verdict, 'INVALID');
+  }
+});
+
+test('verifyBadgeWitnessed does not crash on a malformed but object-shaped badge', async () => {
+  for (const malformed of [{}, [], { assurance_tier: 'WITNESSED', inception: {} }]) {
+    const v = await aid.verifyBadgeWitnessed(malformed);
+    assert.equal(v.verdict, 'INVALID');
+  }
+});
+
+// An oversized VIAID_WITNESS_TIMEOUT_MS silently collapsed to ~1ms too -- Node's setTimeout
+// clamps any delay above 2^31-1ms to ~1ms rather than erroring, so the original NaN-only guard
+// let a huge value straight through.
+test('parseWitnessTimeoutMs falls back to the default on an oversized value', () => {
+  assert.equal(aid.parseWitnessTimeoutMs('9999999999'), 10000);
+  assert.equal(aid.parseWitnessTimeoutMs(2 ** 31), 10000);
+  assert.equal(aid.parseWitnessTimeoutMs('300000'), 300000); // exactly at the cap: still allowed
+  assert.equal(aid.parseWitnessTimeoutMs('300001'), 10000); // just over: falls back
+});
+
+// verifyBadgeWitnessed(badge, null) crashed on destructuring `null` -- default parameters only
+// apply to `undefined`, not `null`.
+test('verifyBadgeWitnessed(badge, null) does not crash', async () => {
+  const root = tmpRoot();
+  try {
+    const badge = aid.mintBadge({ name: 'a', workRoot: root });
+    const v = await aid.verifyBadgeWitnessed(badge, null);
+    assert.equal(v.witness_state, 'NOT_APPLICABLE'); // SELF-tier badge, opts otherwise ignored
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// A type-skewed `witnessed` field (string "true" / number 1, instead of a real boolean) used to
+// fall through to the same branch as `witnessed: false` (silently read as clean) since only
+// `=== true` was ever checked positively.
+test('verifyBadgeWitnessed treats a non-boolean witnessed field as ambiguous, not clean', async () => {
+  const root = tmpRoot();
+  try {
+    const badge = await mintFakeWitnessedBadge(root);
+    for (const weirdWitnessed of ['true', 1, 'false', 0, null, undefined]) {
+      const result = await withMockFetch(
+        async () => fakeResponse({ ok: true, status: 200, json: { agent_id: badge.agent_id, witnessed: weirdWitnessed } }),
+        () => aid.verifyBadgeWitnessed(badge),
+      );
+      assert.equal(result.witness_state, 'UNREACHABLE', `witnessed=${JSON.stringify(weirdWitnessed)} should not be treated as a confirmed answer`);
+      assert.equal(result.verdict, 'UNKNOWN');
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// No scheme check previously existed on the witness service URL -- an http:// override would
+// silently send signed registration data / revocation queries over plaintext.
+test('mintWitnessedBadge refuses a non-HTTPS witness service URL', async () => {
+  const root = tmpRoot();
+  await assert.rejects(
+    () => aid.mintWitnessedBadge({ name: 'a', workRoot: root, witnessServiceUrl: 'http://evil.example.com' }),
+    /refusing non-HTTPS/,
+  );
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('mintWitnessedBadge allows http:// to localhost for local development', async () => {
+  const root = tmpRoot();
+  try {
+    const badge = await withMockFetch(
+      async () => fakeResponse({ ok: true, status: 201, json: { already_registered: false } }),
+      () => aid.mintWitnessedBadge({ name: 'a', workRoot: root, witnessServiceUrl: 'http://localhost:4000' }),
+    );
+    assert.equal(badge.assurance_tier, 'WITNESSED');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('verifyBadgeWitnessed treats a non-HTTPS witness service URL as an unreachable fallback, never throws, never calls fetch', async () => {
+  const root = tmpRoot();
+  try {
+    const badge = await mintFakeWitnessedBadge(root);
+    let fetchCalled = false;
+    const result = await withMockFetch(
+      async () => { fetchCalled = true; return fakeResponse(); },
+      () => aid.verifyBadgeWitnessed(badge, { witnessServiceUrl: 'http://evil.example.com' }),
+    );
+    assert.equal(result.witness_state, 'UNREACHABLE');
+    assert.equal(result.verdict, 'UNKNOWN');
+    assert.equal(fetchCalled, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

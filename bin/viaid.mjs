@@ -25,9 +25,16 @@ function ensureRoot() { mkdirSync(ROOT, { recursive: true }); }
 
 const cmds = {
   // ---------- S2: developer badges an agent it sends out ----------
-  init([name = 'my-agent']) {
+  // POST-REVIEW FIX (SAT-958, 2nd round): mintWitnessedBadge()/verifyBadgeWitnessed() existed in
+  // src/agentid.mjs but nothing in this CLI ever called them — the WITNESSED tier was reachable
+  // only by importing the library directly, not by anyone actually running `viaid`. `--witnessed`
+  // wires the one missing entry point; `verify`/`scan` below wire the other two.
+  async init([name = 'my-agent', ...flags]) {
     ensureRoot();
-    const badge = aid.mintBadge({ name, workRoot: ROOT });
+    const witnessed = flags.includes('--witnessed');
+    const badge = witnessed
+      ? await aid.mintWitnessedBadge({ name, workRoot: ROOT })
+      : aid.mintBadge({ name, workRoot: ROOT });
     aid.saveBadge(badgePath(badge.agent_id), badge);
     log(`✔ minted AgentID ${badge.agent_id}  (state=${badge.revocation_state}, tier=${badge.assurance_tier})`);
     log(`  badge → ${badgePath(badge.agent_id)}`);
@@ -57,20 +64,32 @@ const cmds = {
     log(`✔ GraphSmith eval: ${evidence.status}  profiles=[${evidence.confirmed_profiles.join(', ') || 'none'}]  (engine: ${evidence.engine})`);
     if (evidence.downgraded_profiles.length) log(`  unavailable (grey, never green): [${evidence.downgraded_profiles.join(', ')}]`);
   },
-  verify([id]) {
+  // WITNESSED-tier badges get the online revocation check here; SELF-tier badges take the
+  // existing synchronous, zero-network path unchanged (verifyBadge() itself still discloses,
+  // in scope_note, when a WITNESSED badge is checked WITHOUT the online call — see there).
+  async verify([id]) {
     const badge = aid.loadBadge(badgePath(id));
-    const v = aid.verifyBadge(badge);
-    log(`Verdict: ${v.verdict}   freshness=${v.freshness_state}   tier=${v.assurance_tier}   key_seq=${v.key_seq}`);
+    const v = badge.assurance_tier === 'WITNESSED'
+      ? await aid.verifyBadgeWitnessed(badge)
+      : aid.verifyBadge(badge);
+    log(`Verdict: ${v.verdict}   freshness=${v.freshness_state}   tier=${v.assurance_tier}   key_seq=${v.key_seq}${v.witness_state ? `   witness=${v.witness_state}` : ''}`);
     log(`Coverage: ${v.coverage}`);
     log(`Scope:    ${v.scope_note}`);
     for (const s of v.steps) log(`  [${s.status}] ${s.step}${s.detail ? ' — ' + s.detail : ''}`);
     return v;
   },
   // ---------- S1: org runs the desk on an inbound agent ----------
-  scan([id]) {
+  async scan([id]) {
     const badge = aid.loadBadge(badgePath(id));
-    const v = aid.verifyBadge(badge);
-    log(`Inbound badge ${id}: ${v.verdict} (issuer=native VIA ID → pre-cleared lane)`);
+    const v = badge.assurance_tier === 'WITNESSED'
+      ? await aid.verifyBadgeWitnessed(badge)
+      : aid.verifyBadge(badge);
+    // This is the actual SAT-958 threat scenario (an org screening an inbound agent), so the
+    // tier/online-check status is always disclosed here, not just in the fuller `verify` output.
+    const tierNote = v.witness_state
+      ? `tier=${v.assurance_tier}, witness=${v.witness_state}`
+      : `tier=${v.assurance_tier}, no online witness check performed`;
+    log(`Inbound badge ${id}: ${v.verdict} (${tierNote}; issuer=native VIA ID → pre-cleared lane)`);
     return v;
   },
   async gate([id, destination = 'index.js']) {
@@ -94,11 +113,11 @@ const cmds = {
     writeFileSync(join(sample, 'README.md'), '# sample agent\nPublic demo agent.\n');
 
     hr(); log('S2 — DEV: badge an agent I send out'); hr();
-    const id = cmds.init(['acme-ops-agent']);
+    const id = await cmds.init(['acme-ops-agent']);
     cmds.log([id, 'deployed', 'claude-sonnet']);
     cmds.log([id, 'called payments API', 'claude-sonnet']);
     await cmds.eval([id, sample]);
-    log(''); const v1 = cmds.verify([id]);
+    log(''); const v1 = await cmds.verify([id]);
 
     // write the public verify page
     const page = join(ROOT, id + '.verify.html');
@@ -106,7 +125,7 @@ const cmds = {
     log(`\n  verify page → ${page}`);
 
     hr(); log('S1 — ORG: run the desk on this agent (scan → pass → gate → kill)'); hr();
-    cmds.scan([id]);
+    await cmds.scan([id]);
     const domain = join(ROOT, 'org-domain', '.knosky');
     const city = join(ROOT, 'org-domain', 'city-data.json');
     mkdirSync(domain, { recursive: true });
@@ -126,7 +145,7 @@ const cmds = {
     aid.saveBadge(badgePath(id), badge);
     const g2 = await ks.gate(domain, city, { leaseId, agentId: id, destination: 'index.js' });
     log(`Gate after kill:  ${g2.decision_code}  ← the desk now refuses it`);
-    log(''); cmds.verify([id]);
+    log(''); await cmds.verify([id]);
 
     hr();
     log('DONE. Reused: GraphSmith (eval→evidence) + KnoSky (identity→policy→receipt→refuse).');
@@ -138,7 +157,7 @@ const cmds = {
 const [cmd, ...args] = process.argv.slice(2);
 const fn = cmds[cmd];
 if (!fn) {
-  log('viaid — thin prototype\n  S2: init <name> · log <id> <action> · rotate <id> [reason|compromise] [suspected_since] · eval <id> <dir> · verify <id>\n  S1: scan <id> · gate <id> [dest] · (revoke via demo)\n  demo  — full two-sided flow');
+  log('viaid — thin prototype\n  S2: init <name> [--witnessed] · log <id> <action> · rotate <id> [reason|compromise] [suspected_since] · eval <id> <dir> · verify <id>\n  S1: scan <id> · gate <id> [dest] · (revoke via demo)\n  demo  — full two-sided flow\n  --witnessed on init mints a WITNESSED-tier badge (online revocation check at verify/scan time); default is SELF-tier (offline).');
   process.exit(cmd ? 1 : 0);
 }
 try { await fn(args); }

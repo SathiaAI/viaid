@@ -67,10 +67,11 @@ All three auto-detect Claude Code, Codex CLI, Gemini CLI, Cursor, and Windsurf o
 and copy the skill into each one's skills directory. Takes under a second.
 
 ```bash
-node bin/viaid.mjs init "my-agent"      # mint a badge once, when the agent ships
-node bin/viaid.mjs log <id> "did-thing" # the agent's own runtime calls this after each action
-node bin/viaid.mjs verify <id>          # check a badge — VALID / STALE / REVOKED / UNKNOWN
-node bin/viaid.mjs rotate <id> [reason] # rotate the agent key on schedule or after compromise
+node bin/viaid.mjs init "my-agent"            # mint a badge once, when the agent ships (SELF tier)
+node bin/viaid.mjs init "my-agent" --witnessed # same, but registers with the hosted Witness Service
+node bin/viaid.mjs log <id> "did-thing"       # the agent's own runtime calls this after each action
+node bin/viaid.mjs verify <id>                # check a badge — VALID / STALE / REVOKED / UNKNOWN
+node bin/viaid.mjs rotate <id> [reason]       # rotate the agent key on schedule or after compromise
 ```
 
 See it work end-to-end in under a minute: [live public demo](https://sathiaai.github.io/viaid-demo/).
