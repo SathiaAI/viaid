@@ -29,8 +29,17 @@ const cmds = {
   // src/agentid.mjs but nothing in this CLI ever called them — the WITNESSED tier was reachable
   // only by importing the library directly, not by anyone actually running `viaid`. `--witnessed`
   // wires the one missing entry point; `verify`/`scan` below wire the other two.
-  async init([name = 'my-agent', ...flags]) {
+  async init(argv) {
     ensureRoot();
+    // POST-REVIEW FIX (4th round): `[name = 'my-agent', ...flags]` treated ARGV POSITION 0 as the
+    // name unconditionally — `init --witnessed` (no explicit name) silently minted a SELF-tier
+    // badge literally NAMED "--witnessed" with the flag never recognized, and `init --witnessed
+    // my-agent` (flag before name) did the same while silently discarding "my-agent" entirely.
+    // Only `init my-agent --witnessed` (flag last) happened to work. Flags (`--*`) and positionals
+    // are now separated regardless of order, matching how `--witnessed` is already read below.
+    const flags = argv.filter((a) => a.startsWith('--'));
+    const positionals = argv.filter((a) => !a.startsWith('--'));
+    const name = positionals[0] || 'my-agent';
     const witnessed = flags.includes('--witnessed');
     const badge = witnessed
       ? await aid.mintWitnessedBadge({ name, workRoot: ROOT })
