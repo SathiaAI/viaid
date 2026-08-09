@@ -286,7 +286,14 @@ export async function mintWitnessedBadge(opts) {
           body: JSON.stringify({ inception: badge.inception, owner_sig, voucher_sig }),
         });
       } catch (e) {
-        throw new Error(`WITNESSED mint failed: witness-register request to ${witnessServiceUrl} errored — ${e.message}`);
+        // POST-REVIEW FIX (decision 2, wave 6): this catch fires for the class of failures that
+        // are almost always a network problem on the CALLER's end (DNS failure, connection
+        // refused, TLS handshake failure, or the abort firing before headers ever arrive) rather
+        // than anything wrong with the badge or the witness service's own logic. Said so plainly
+        // -- the generic Error.message is the ONLY thing that reaches the user here (see
+        // bin/viaid.mjs's top-level `catch (e) { console.error('✖', e.message); }`), so a person
+        // with no way to inspect `e.message`'s cause needs this spelled out, not implied.
+        throw new Error(`WITNESSED mint failed: witness-register request to ${witnessServiceUrl} errored — ${e.message}. This usually means a poor or interrupted network connection rather than a problem with your badge — please check your connection and run this command again.`);
       }
       // POST-REVIEW FIX: the body read now happens INSIDE the same timer-protected scope. Previously
       // clearTimeout() ran right after fetch() resolved (headers only), so a response that stalled
@@ -296,7 +303,10 @@ export async function mintWitnessedBadge(opts) {
         body = await res.json();
       } catch {
         if (ctrl.signal.aborted) {
-          throw new Error(`WITNESSED mint failed: witness-register request to ${witnessServiceUrl} timed out reading the response body after ${WITNESS_HTTP_TIMEOUT_MS}ms`);
+          // POST-REVIEW FIX (decision 2, wave 6): a stalled response body is also almost always a
+          // connectivity problem, not a badge or witness-service-logic problem -- same rationale
+          // as the fetch()-level catch above.
+          throw new Error(`WITNESSED mint failed: witness-register request to ${witnessServiceUrl} timed out reading the response body after ${WITNESS_HTTP_TIMEOUT_MS}ms. This usually means a poor or interrupted network connection rather than a problem with your badge — please check your connection and run this command again.`);
         }
         // else: body stays null — no longer silently accepted, see the confirmation check below.
       }
@@ -317,6 +327,23 @@ export async function mintWitnessedBadge(opts) {
     // treated as a failed registration rather than silently accepted.
     if (!body || typeof body.already_registered !== 'boolean' || body.error || body.status === 'error') {
       throw new Error(`WITNESSED mint failed: witness-register returned HTTP ${res.status} but did not confirm registration${body && body.error ? ` — ${body.error}` : body ? ` (got ${JSON.stringify(body)})` : ' (empty or unparseable body)'}`);
+    }
+    // POST-REVIEW FIX (decision 3, wave 6 -- SEC-003, confirmed safe against viaid-witness's real
+    // contract before implementing, not assumed): mirrors the existing witness-status agent_id
+    // check added in wave 4 (see the matching comment in verifyBadgeWitnessed() below) -- a
+    // generic success response with no agent_id, or (in a misconfigured/multi-tenant deployment)
+    // someone else's agent_id, was previously still accepted as proof THIS badge was registered.
+    // Confirmed against viaid-witness's actual source (2026-08-09, not inferred): registerAgent()
+    // (lib/witness.mjs) returns either db.insertRegistration()'s or db.getRegistration()'s row
+    // spread with `already_registered`, and BOTH db functions' SQL explicitly
+    // RETURNING/SELECT agent_id (lib/db.mjs) -- structurally guaranteed by the query, not just an
+    // application-level convention that could silently drift. viaid-witness's own e2e test asserts
+    // this directly (test/witness_register.e2e.test.mjs: `bResult.agent_id === b.agent_id` on the
+    // exact success path this client code calls). witness-register.js (the HTTP handler) returns
+    // registerAgent()'s result unmodified (`res.status(...).json(result)`, no field stripping), so
+    // this holds all the way through the HTTP boundary too.
+    if (body.agent_id !== badge.agent_id) {
+      throw new Error(`WITNESSED mint failed: witness-register returned HTTP ${res.status} confirming registration for agent_id=${JSON.stringify(body.agent_id)}, but this badge's agent_id is ${JSON.stringify(badge.agent_id)} — refusing to trust a response for the wrong agent`);
     }
 
     // Step 4: only NOW claim WITNESSED — re-sign the whole badge core so the tier change itself is
@@ -433,6 +460,23 @@ export function revokeBadge(badge, workRoot, reason = 'revoked') {
 // copy-pasting the wrong pattern (see the general "never throws" regression test in
 // test/agentid.witnessed.test.mjs, added for the same reason).
 function asArray(value) { return Array.isArray(value) ? value : []; }
+
+// POST-REVIEW FIX (decision 1, wave 6 -- Paul's explicit direction on round 4/5's confirmed
+// security-1/SEC-001 finding, formerly recorded as an intentionally-unfixed product-semantics
+// question in round 5's validation/confirmed-unfixed-security-1.json): shared "never mask a
+// worse verdict" rule. WITNESSED tier exists specifically to catch a revoked badge a SELF-tier
+// check can't see; a caller who only branches on `.verdict` (exactly what that field is for)
+// must NOT see the same value for "the online check was never attempted/was skipped" as for "the
+// online check genuinely ran and came back clean". INVALID/REVOKED are already the worst
+// realistic states a badge can present and are never softened by an incomplete check; VALID/
+// STALE downgrade to UNKNOWN because the one check that matters most for this tier could not be
+// completed. Used by verifyBadge()'s direct-WITNESSED-call branch (never asked) and by
+// verifyBadgeWitnessed()'s SKIPPED branch (explicitly asked not to check) -- mirrors the
+// identical rule verifyBadgeWitnessed() has always applied to its own UNREACHABLE fallback paths
+// (network error, non-OK status, timeout, malformed/wrong-agent response).
+function downgradeUnconfirmedVerdict(verdict) {
+  return (verdict === 'INVALID' || verdict === 'REVOKED') ? verdict : 'UNKNOWN';
+}
 
 // ---- verify (viaid verify / scan) → honest verdict ----
 // POST-REVIEW FIX (3rd round, caught by live CLI smoke-test rather than by review): the 2nd
@@ -563,7 +607,7 @@ export function verifyBadge(badge, opts) {
   push('freshness / revocation state', offline_state === 'FRESH', offline_state);
 
   const structurally_valid = recomputed === badge.agent_id && sigOk && chainOk;
-  const verdict = !structurally_valid ? 'INVALID'
+  let verdict = !structurally_valid ? 'INVALID'
     : offline_state === 'REVOKED' ? 'REVOKED'
     : offline_state === 'STALE' ? 'STALE'
     : offline_state === 'UNKNOWN' ? 'UNKNOWN'
@@ -589,7 +633,20 @@ export function verifyBadge(badge, opts) {
     // THIS function alone got zero disclosure of that, so every pre-existing caller (e.g. the
     // CLI's `viaid verify`, which calls verifyBadge() directly) silently got a verdict no
     // stronger than SELF-tier while the badge itself claimed a higher tier.
-    scope_note += ' This badge claims WITNESSED tier, but this synchronous check did not perform the online witness lookup — call verifyBadgeWitnessed() to independently confirm revocation status; absent that call, this verdict relies on local-log-only semantics, same as a SELF-tier badge.';
+    //
+    // POST-REVIEW FIX (decision 1, wave 6 -- round 4/5's confirmed security-1/SEC-001 finding):
+    // disclosure in scope_note alone was not enough -- a caller that only branches on the
+    // machine-checkable `.verdict` field (exactly what that field is for) saw an unconfirmed
+    // WITNESSED badge read identically to one that was genuinely checked and came back clean.
+    // The verdict itself is now downgraded via the same "never mask a worse verdict, otherwise
+    // fall back to UNKNOWN" rule verifyBadgeWitnessed() already applies to its own failed/skipped
+    // online-check paths (see downgradeUnconfirmedVerdict()) -- so "never asked" now reads the
+    // same as "asked and failed", instead of silently reading the same as "asked and succeeded".
+    const preDowngradeVerdict = verdict;
+    verdict = downgradeUnconfirmedVerdict(verdict);
+    scope_note += verdict !== preDowngradeVerdict
+      ? ` This badge claims WITNESSED tier, but this synchronous check did not perform the online witness lookup, so the verdict was downgraded from ${preDowngradeVerdict} to ${verdict} — call verifyBadgeWitnessed() to independently confirm revocation status; absent that call, this verdict relies on local-log-only semantics, same as a SELF-tier badge.`
+      : ' This badge claims WITNESSED tier, but this synchronous check did not perform the online witness lookup — call verifyBadgeWitnessed() to independently confirm revocation status; this verdict relies on local-log-only semantics, same as a SELF-tier badge.';
   }
   if (compromisedSince) {
     scope_note += ` Note: a COMPROMISE_ROTATION event flags key material suspected compromised since ${compromisedSince} — log entries in that window should be discounted by the reader, not treated as trusted.`;
@@ -647,21 +704,21 @@ export async function verifyBadgeWitnessed(badge, opts) {
   if (tier !== 'WITNESSED') {
     return { ...verdict, witness_state: 'NOT_APPLICABLE' };
   }
+
+  // POST-REVIEW FIX (decision 1, wave 6): computed once, up front, via the shared
+  // downgradeUnconfirmedVerdict() helper (see its definition for the "never mask a worse
+  // verdict" rule), and now applied to EVERY fallback path below, including SKIPPED just below --
+  // previously only the UNREACHABLE paths downgraded the verdict; SKIPPED silently returned the
+  // undowngraded base verdict (round 4/5's confirmed security-1/SEC-001 finding, decided by Paul
+  // 2026-08-09: downgrade to UNKNOWN, matching the check-failed case).
+  const fallbackVerdict = downgradeUnconfirmedVerdict(verdict.verdict);
+
   if (!checkWitness) {
     return {
-      ...verdict, witness_state: 'SKIPPED',
+      ...verdict, verdict: fallbackVerdict, witness_state: 'SKIPPED',
       scope_note: `${verdict.scope_note} The online witness check was explicitly skipped for this verify call — this verdict relies on local-log-only semantics, same as a SELF-tier badge.`,
     };
   }
-
-  // POST-REVIEW FIX: a witness-check FAILURE used to return the exact same top-level `verdict`
-  // as a genuine online confirmation would (only the easy-to-miss `witness_state` field
-  // differed) — so an attacker who could merely block network access to the witness service
-  // could force every WITNESSED verify call into the fallback path while it still read as fully
-  // verified to any caller that only checks `.verdict`. INVALID/REVOKED are already the worst
-  // realistic states and are never masked further; VALID/STALE downgrade to UNKNOWN because the
-  // one check that matters most for this tier could not be completed.
-  const fallbackVerdict = (verdict.verdict === 'INVALID' || verdict.verdict === 'REVOKED') ? verdict.verdict : 'UNKNOWN';
 
   const url = witnessServiceUrl || WITNESS_SERVICE_URL;
   // POST-REVIEW FIX (2nd round): no scheme was checked here either — same plaintext-exposure risk
@@ -691,9 +748,14 @@ export async function verifyBadgeWitnessed(badge, opts) {
       res = await fetch(`${url}/api/witness-status?agent_id=${encodeURIComponent(verdict.agent_id || badge.agent_id || '')}`, { signal: ctrl.signal, redirect: 'manual' });
     } catch (e) {
       console.warn(`[viaid:witness] verify fallback: witness service unreachable at ${url} (${e.message}) — agent_id=${badge.agent_id || 'unknown'}`);
+      // POST-REVIEW FIX (decision 2, wave 6): same rationale as mintWitnessedBadge()'s matching
+      // fetch()-catch above -- a rejected fetch() here is almost always a connectivity problem on
+      // the caller's end, so say that plainly instead of leaving the reader to guess from "the
+      // witness service was unreachable" whether that means their network, the service being
+      // down, or something about their badge.
       return {
         ...verdict, verdict: fallbackVerdict, witness_state: 'UNREACHABLE',
-        scope_note: `${verdict.scope_note} The online witness check was attempted but the witness service was unreachable — this verdict fell back to local-log-only semantics, same as a SELF-tier badge, despite being WITNESSED-tier.`,
+        scope_note: `${verdict.scope_note} The online witness check was attempted but the witness service was unreachable — this verdict fell back to local-log-only semantics, same as a SELF-tier badge, despite being WITNESSED-tier. This usually means a poor or interrupted network connection rather than a problem with this badge — please check your connection and try the verification again.`,
       };
     }
     if (!res.ok) {
@@ -710,13 +772,20 @@ export async function verifyBadgeWitnessed(badge, opts) {
     try {
       body = await res.json();
     } catch (e) {
-      const reason = ctrl.signal.aborted
+      const timedOut = ctrl.signal.aborted;
+      const reason = timedOut
         ? `timed out reading the response body after ${WITNESS_HTTP_TIMEOUT_MS}ms`
         : `response was not valid JSON (${e.message})`;
       console.warn(`[viaid:witness] verify fallback: witness service at ${url} ${reason} — agent_id=${badge.agent_id || 'unknown'}`);
+      // POST-REVIEW FIX (decision 2, wave 6): ONLY the timeout branch is a genuine connectivity
+      // problem -- a response that arrived but wasn't valid JSON is a witness-service-side issue,
+      // not something "check your connection and retry" would fix, so that branch's message is
+      // deliberately left unchanged. Scoped this precisely per Paul's explicit direction: the
+      // retry language belongs only at genuine-connectivity-failure sites, not generically on
+      // every failure path.
       return {
         ...verdict, verdict: fallbackVerdict, witness_state: 'UNREACHABLE',
-        scope_note: `${verdict.scope_note} The online witness check was attempted but the witness service's response ${reason} — this verdict fell back to local-log-only semantics, same as a SELF-tier badge, despite being WITNESSED-tier.`,
+        scope_note: `${verdict.scope_note} The online witness check was attempted but the witness service's response ${reason} — this verdict fell back to local-log-only semantics, same as a SELF-tier badge, despite being WITNESSED-tier.${timedOut ? ' This usually means a poor or interrupted network connection rather than a problem with this badge — please check your connection and try the verification again.' : ''}`,
       };
     }
   } finally {
