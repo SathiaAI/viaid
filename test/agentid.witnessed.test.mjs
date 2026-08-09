@@ -16,6 +16,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, existsSync, readdirSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { createHash } from 'node:crypto';
 
 const aid = await import('../src/agentid.mjs');
 
@@ -54,10 +55,22 @@ function fakeResponse({ ok = true, status = 200, json, hangUntilAborted = false 
   };
 }
 
+// Mirrors mintBadge()'s own agent_id derivation ('via_' + sha256(canonical(inception)).slice(0,32),
+// see src/agentid.mjs) so mock witness-register responses below can echo back the SAME agent_id the
+// client just derived -- needed now that mintWitnessedBadge() checks the registration response
+// actually confirms ITS agent_id (SEC-003, wave 6), mirroring the equivalent check
+// verifyBadgeWitnessed() has always applied to witness-status responses.
+function computeAgentId(inception) {
+  return 'via_' + createHash('sha256').update(aid.canonical(inception)).digest('hex').slice(0, 32);
+}
+
 // ---- helpers to get a WITNESSED-tier badge without a real network call, for verify-side tests ----
 async function mintFakeWitnessedBadge(root) {
   return withMockFetch(
-    async () => fakeResponse({ ok: true, status: 201, json: { already_registered: false } }),
+    async (_url, opts) => {
+      const { inception } = JSON.parse(opts.body);
+      return fakeResponse({ ok: true, status: 201, json: { already_registered: false, agent_id: computeAgentId(inception) } });
+    },
     () => aid.mintWitnessedBadge({ name: 'test-agent', owner: 'tester', workRoot: root }),
   );
 }
@@ -83,14 +96,51 @@ test('verifyBadgeWitnessed(undefined) and verifyBadgeWitnessed("string") also do
 // Bug #3 [HIGH]: the synchronous verifyBadge() gave zero disclosure when called directly on a
 // WITNESSED badge (e.g. by the CLI's `viaid verify`, which never calls verifyBadgeWitnessed()).
 // ============================================================================================
-test('verifyBadge() discloses that a WITNESSED-tier badge was NOT online-checked synchronously', () => {
+test('verifyBadge() discloses that a WITNESSED-tier badge was NOT online-checked synchronously', async () => {
   const root = tmpRoot();
   try {
-    const badge = aid.mintBadge({ name: 'a', workRoot: root });
-    badge.assurance_tier = 'WITNESSED'; // simulate a WITNESSED badge without the network round trip
+    // POST-REVIEW FIX (decision 1, wave 6): this used to build its fixture via
+    // `aid.mintBadge(...)` + a direct `badge.assurance_tier = 'WITNESSED'` mutation with no
+    // resign() -- since assurance_tier IS part of the signed core, that mutation silently made
+    // the badge structurally INVALID (sigOk false) from the start. That was invisible before
+    // because this test never asserted on `.verdict`, only on scope_note text (which the
+    // WITNESSED-disclosure branch appends regardless of sigOk). Now that verdict is asserted
+    // below, the fixture must be genuinely valid -- mintFakeWitnessedBadge() runs the real
+    // mintWitnessedBadge() path (mocked network only) and resigns properly, same as production.
+    const badge = await mintFakeWitnessedBadge(root);
     const v = aid.verifyBadge(badge);
     assert.match(v.scope_note, /did not perform the online witness lookup/);
     assert.match(v.scope_note, /verifyBadgeWitnessed/);
+    // A fresh, structurally-valid badge would otherwise read VALID here even though the one check
+    // WITNESSED tier exists to provide was never attempted -- downgraded to UNKNOWN (round 4/5's
+    // confirmed security-1/SEC-001 finding).
+    assert.equal(v.verdict, 'UNKNOWN');
+    assert.match(v.scope_note, /downgraded from VALID to UNKNOWN/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// POST-REVIEW FIX (decision 1, wave 6): the downgrade above must never SOFTEN an already-worse
+// verdict -- INVALID/REVOKED are the worst realistic states a badge can present, and an
+// unconfirmed online check must not make either of them read as the merely-uncertain UNKNOWN.
+test('verifyBadge() called directly on a WITNESSED badge never masks an already-INVALID or REVOKED verdict', () => {
+  const root = tmpRoot();
+  try {
+    // INVALID case: break id integrity.
+    const badgeA = aid.mintBadge({ name: 'a', workRoot: root });
+    badgeA.assurance_tier = 'WITNESSED';
+    badgeA.agent_id = 'via_tampered0000000000000000000000';
+    const vA = aid.verifyBadge(badgeA);
+    assert.equal(vA.verdict, 'INVALID');
+
+    // REVOKED case: genuinely revoked (via the real revokeBadge() path, so it stays correctly
+    // signed) but never online-checked -- REVOKED must still win, not get "helpfully" downgraded.
+    let badgeB = aid.mintBadge({ name: 'b', workRoot: root });
+    badgeB.assurance_tier = 'WITNESSED';
+    badgeB = aid.revokeBadge(badgeB, root);
+    const vB = aid.verifyBadge(badgeB);
+    assert.equal(vB.verdict, 'REVOKED');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -143,6 +193,8 @@ test('verifyBadgeWitnessed times out a stalled response body instead of hanging 
     assert.ok(elapsedMs < 2000, `expected the stalled body to time out quickly, took ${elapsedMs}ms`);
     assert.equal(result.witness_state, 'UNREACHABLE');
     assert.match(result.scope_note, /timed out reading the response body/);
+    // Decision 2 [wave 6]: a stalled body is also a connectivity problem, not a badge issue.
+    assert.match(result.scope_note, /poor or interrupted network connection/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -157,13 +209,38 @@ test('mintWitnessedBadge times out a stalled registration response body instead 
         async (_url, opts) => fakeResponse({ ok: true, status: 201, hangUntilAborted: true }, opts?.signal),
         () => aid.mintWitnessedBadge({ name: 'a', workRoot: root }),
       ),
-      /timed out reading the response body/,
+      (err) => {
+        assert.match(err.message, /timed out reading the response body/);
+        // Decision 2 [wave 6]: a stalled body is also a connectivity problem, not a badge issue.
+        assert.match(err.message, /poor or interrupted network connection/);
+        return true;
+      },
     );
     const elapsedMs = Date.now() - start;
     assert.ok(elapsedMs < 2000, `expected the stalled body to time out quickly, took ${elapsedMs}ms`);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// Decision 2 [wave 6]: the fetch()-level catch (DNS failure, connection refused, TLS failure, or
+// an abort firing before headers ever arrive) is almost always a connectivity problem on the
+// CALLER's end, not a badge or witness-service-logic problem. Paul's explicit direction
+// (2026-08-09): tell the user that plainly, scoped ONLY to genuine connectivity failures.
+test('mintWitnessedBadge tells the user this looks like a connection problem when the request itself fails', async () => {
+  const root = tmpRoot();
+  await assert.rejects(
+    () => withMockFetch(
+      async () => { throw new Error('ECONNREFUSED'); },
+      () => aid.mintWitnessedBadge({ name: 'a', workRoot: root }),
+    ),
+    (err) => {
+      assert.match(err.message, /ECONNREFUSED/, 'the underlying error detail must still be present');
+      assert.match(err.message, /poor or interrupted network connection/, 'must tell the user this looks like a connection problem');
+      return true;
+    },
+  );
+  rmSync(root, { recursive: true, force: true });
 });
 
 // ============================================================================================
@@ -183,6 +260,9 @@ test('verifyBadgeWitnessed downgrades verdict to UNKNOWN when the witness servic
     assert.equal(result.witness_state, 'UNREACHABLE');
     assert.equal(result.verdict, 'UNKNOWN');
     assert.notEqual(result.verdict, 'VALID');
+    // Decision 2 [wave 6]: a rejected fetch() is almost always a connectivity problem on the
+    // caller's end -- say so plainly rather than leaving the reader to guess.
+    assert.match(result.scope_note, /poor or interrupted network connection/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -198,6 +278,9 @@ test('verifyBadgeWitnessed downgrades verdict to UNKNOWN on a non-OK HTTP status
     );
     assert.equal(result.witness_state, 'UNREACHABLE');
     assert.equal(result.verdict, 'UNKNOWN');
+    // Decision 2 [wave 6]: an HTTP error status is a server-side issue, not a connectivity
+    // problem on the caller's end -- the retry language must NOT appear here.
+    assert.doesNotMatch(result.scope_note, /poor or interrupted network connection/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -213,6 +296,10 @@ test('verifyBadgeWitnessed downgrades verdict to UNKNOWN on an invalid JSON body
     );
     assert.equal(result.witness_state, 'UNREACHABLE');
     assert.equal(result.verdict, 'UNKNOWN');
+    // Decision 2 [wave 6]: malformed JSON (not a timeout) is a witness-service-side issue, not a
+    // connectivity problem -- "check your connection and retry" would not fix this, so the retry
+    // language must NOT appear here. Locks in the precise scoping Paul asked for.
+    assert.doesNotMatch(result.scope_note, /poor or interrupted network connection/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -303,12 +390,37 @@ test('verifyBadgeWitnessed with checkWitness:false is SKIPPED and never calls fe
       () => aid.verifyBadgeWitnessed(badge, { checkWitness: false }),
     );
     assert.equal(result.witness_state, 'SKIPPED');
-    assert.equal(result.verdict, 'VALID');
+    // POST-REVIEW FIX (decision 1, wave 6): previously VALID -- an explicitly-skipped online check
+    // used to read identically to a genuinely-confirmed-clean one to any caller checking only
+    // `.verdict`. Now downgraded to UNKNOWN, matching the check-FAILED case (round 4/5's confirmed
+    // security-1/SEC-001 finding; Paul's decision 2026-08-09).
+    assert.equal(result.verdict, 'UNKNOWN');
     assert.equal(fetchCalled, false);
     // POST-REVIEW FIX (3rd round): same fix as CHECKED_CLEAN/CHECKED_REVOKED above, covering the
     // fallback-path family (SKIPPED/UNREACHABLE) that previously also re-stated the now-superseded
     // "did not perform the online witness lookup" sentence redundantly alongside their own text.
     assert.doesNotMatch(result.scope_note, /did not perform the online witness lookup/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// POST-REVIEW FIX (decision 1, wave 6): same "never mask a worse verdict" invariant as the direct
+// verifyBadge() test above, exercised through the SKIPPED path specifically.
+test('verifyBadgeWitnessed with checkWitness:false never masks an already-INVALID or REVOKED verdict', async () => {
+  const root = tmpRoot();
+  try {
+    const badgeA = await mintFakeWitnessedBadge(root);
+    badgeA.agent_id = 'via_tampered0000000000000000000000';
+    const vA = await aid.verifyBadgeWitnessed(badgeA, { checkWitness: false });
+    assert.equal(vA.witness_state, 'SKIPPED');
+    assert.equal(vA.verdict, 'INVALID');
+
+    let badgeB = await mintFakeWitnessedBadge(root);
+    badgeB = aid.revokeBadge(badgeB, root);
+    const vB = await aid.verifyBadgeWitnessed(badgeB, { checkWitness: false });
+    assert.equal(vB.witness_state, 'SKIPPED');
+    assert.equal(vB.verdict, 'REVOKED');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -326,7 +438,10 @@ test('mintWitnessedBadge sends the full inception object (documented, disclosed 
   try {
     let sentBody = null;
     const badge = await withMockFetch(
-      async (_url, opts) => { sentBody = JSON.parse(opts.body); return fakeResponse({ ok: true, status: 201, json: { already_registered: false } }); },
+      async (_url, opts) => {
+        sentBody = JSON.parse(opts.body);
+        return fakeResponse({ ok: true, status: 201, json: { already_registered: false, agent_id: computeAgentId(sentBody.inception) } });
+      },
       () => aid.mintWitnessedBadge({ name: 'agent-name', owner: 'owner-identifier', workRoot: root }),
     );
     assert.equal(badge.assurance_tier, 'WITNESSED');
@@ -345,7 +460,13 @@ test('mintWitnessedBadge throws a clear error on a non-OK registration response'
       async () => fakeResponse({ ok: false, status: 409, json: { error: 'agent_id already registered with different keys' } }),
       () => aid.mintWitnessedBadge({ name: 'a', workRoot: root }),
     ),
-    /witness-register returned HTTP 409/,
+    (err) => {
+      assert.match(err.message, /witness-register returned HTTP 409/);
+      // Decision 2 [wave 6]: an HTTP error status is a server-side conflict, not a connectivity
+      // problem -- the retry language must NOT appear here.
+      assert.doesNotMatch(err.message, /poor or interrupted network connection/);
+      return true;
+    },
   );
   rmSync(root, { recursive: true, force: true });
 });
@@ -463,7 +584,10 @@ test('mintWitnessedBadge allows http:// to localhost for local development', asy
   const root = tmpRoot();
   try {
     const badge = await withMockFetch(
-      async () => fakeResponse({ ok: true, status: 201, json: { already_registered: false } }),
+      async (_url, opts) => {
+        const { inception } = JSON.parse(opts.body);
+        return fakeResponse({ ok: true, status: 201, json: { already_registered: false, agent_id: computeAgentId(inception) } });
+      },
       () => aid.mintWitnessedBadge({ name: 'a', workRoot: root, witnessServiceUrl: 'http://localhost:4000' }),
     );
     assert.equal(badge.assurance_tier, 'WITNESSED');
@@ -620,7 +744,10 @@ test('mintWitnessedBadge accepts already_registered:true as a confirmed (idempot
   const root = tmpRoot();
   try {
     const badge = await withMockFetch(
-      async () => fakeResponse({ ok: true, status: 200, json: { already_registered: true } }),
+      async (_url, opts) => {
+        const { inception } = JSON.parse(opts.body);
+        return fakeResponse({ ok: true, status: 200, json: { already_registered: true, agent_id: computeAgentId(inception) } });
+      },
       () => aid.mintWitnessedBadge({ name: 'a', workRoot: root }),
     );
     assert.equal(badge.assurance_tier, 'WITNESSED');
@@ -686,6 +813,63 @@ test('verifyBadgeWitnessed treats a witness response missing agent_id entirely a
     );
     assert.equal(result.witness_state, 'UNREACHABLE');
     assert.equal(result.verdict, 'UNKNOWN');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ============================================================================================
+// SEC-003 [wave 6, decision 3]: the witness-register (mint) response was never checked to
+// actually confirm registration for THIS badge's agent_id -- a generic success response with no
+// agent_id, or (in a misconfigured/multi-tenant deployment) someone else's agent_id, was
+// previously still accepted as proof of a successful registration. Mirrors the equivalent
+// witness-status checks directly above (correctness-4/security-3, wave 4), now added to the mint
+// side. Confirmed safe against viaid-witness's real contract before implementing (2026-08-09):
+// both success paths (new registration and idempotent already-registered retry) are guaranteed by
+// the server's own SQL (RETURNING/SELECT agent_id, lib/db.mjs) and its own e2e test suite to
+// include the correct agent_id -- see src/agentid.mjs's comment at this check for the sourcing.
+// ============================================================================================
+test('mintWitnessedBadge rejects a registration response missing agent_id entirely, and leaves no orphaned keys', async () => {
+  const root = tmpRoot();
+  await assert.rejects(
+    () => withMockFetch(
+      async () => fakeResponse({ ok: true, status: 201, json: { already_registered: false } }), // no agent_id field at all
+      () => aid.mintWitnessedBadge({ name: 'a', workRoot: root }),
+    ),
+    /refusing to trust a response for the wrong agent/,
+  );
+  const keysDir = join(root, '.keys');
+  const remaining = existsSync(keysDir) ? readdirSync(keysDir) : [];
+  assert.deepEqual(remaining, [], 'a rejected (unconfirmed-agent) registration must not leave orphaned keys');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('mintWitnessedBadge rejects a registration response confirming the WRONG agent_id, and leaves no orphaned keys', async () => {
+  const root = tmpRoot();
+  await assert.rejects(
+    () => withMockFetch(
+      async () => fakeResponse({ ok: true, status: 201, json: { already_registered: false, agent_id: 'via_some_other_agent_entirely' } }),
+      () => aid.mintWitnessedBadge({ name: 'a', workRoot: root }),
+    ),
+    /refusing to trust a response for the wrong agent/,
+  );
+  const keysDir = join(root, '.keys');
+  const remaining = existsSync(keysDir) ? readdirSync(keysDir) : [];
+  assert.deepEqual(remaining, [], 'a rejected (wrong-agent) registration must not leave orphaned keys');
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("mintWitnessedBadge accepts a registration response that correctly confirms this badge's agent_id", async () => {
+  const root = tmpRoot();
+  try {
+    const badge = await withMockFetch(
+      async (_url, opts) => {
+        const { inception } = JSON.parse(opts.body);
+        return fakeResponse({ ok: true, status: 201, json: { already_registered: false, agent_id: computeAgentId(inception) } });
+      },
+      () => aid.mintWitnessedBadge({ name: 'a', workRoot: root }),
+    );
+    assert.equal(badge.assurance_tier, 'WITNESSED');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

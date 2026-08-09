@@ -13,6 +13,8 @@ import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createHash } from 'node:crypto';
+import { canonical } from '../src/agentid.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const CLI = join(HERE, '..', 'bin', 'viaid.mjs');
@@ -24,8 +26,26 @@ function startMockWitness({ witnessed = false } = {}) {
   const server = createServer((req, res) => {
     calls.push(`${req.method} ${req.url}`);
     if (req.method === 'POST' && req.url.startsWith('/api/witness-register')) {
-      res.writeHead(201, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ already_registered: false }));
+      // POST-REVIEW FIX (decision 3, wave 6, SEC-003): the real contract echoes `agent_id` back in
+      // the registration response too, not just witness-status (see src/agentid.mjs's
+      // mintWitnessedBadge() agent_id-matching check, and its comment for the confirmed sourcing
+      // against viaid-witness's actual code). This mock now derives and returns it the same way
+      // the real witness service does (hash of the client-sent `inception`, imported from the
+      // same canonical() this repo's own client and the real server both use) instead of a
+      // generic body that would now fail that check. Only `canonical()` — a pure, I/O-free
+      // function — is imported here; the subprocess/real-network-I/O property this file's header
+      // comment describes is unaffected.
+      let raw = '';
+      req.on('data', (chunk) => { raw += chunk; });
+      req.on('end', () => {
+        let agentId = '';
+        try {
+          const { inception } = JSON.parse(raw);
+          agentId = 'via_' + createHash('sha256').update(canonical(inception)).digest('hex').slice(0, 32);
+        } catch { /* malformed body -- leave agentId empty, not this test file's concern */ }
+        res.writeHead(201, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ already_registered: false, agent_id: agentId }));
+      });
       return;
     }
     if (req.method === 'GET' && req.url.startsWith('/api/witness-status')) {
