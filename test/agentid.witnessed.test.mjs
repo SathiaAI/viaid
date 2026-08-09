@@ -13,7 +13,7 @@ process.env.VIAID_WITNESS_TIMEOUT_MS = '80';
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -484,6 +484,208 @@ test('verifyBadgeWitnessed treats a non-HTTPS witness service URL as an unreacha
     assert.equal(result.witness_state, 'UNREACHABLE');
     assert.equal(result.verdict, 'UNKNOWN');
     assert.equal(fetchCalled, false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ============================================================================================
+// 4th review round findings below. Each is anchored to one specific finding from that round,
+// same pattern as the 2nd/3rd round sections above.
+// ============================================================================================
+
+// test_quality-6 [HIGH]: three separate rounds each added a bespoke regression test for ONE
+// specific malformed field right after it crashed verifyBadge() (`.log` missing, then `.log`'s
+// shape, now `.evidence.confirmed_profiles`/`downgraded_profiles` — see correctness-3 below) —
+// each fix closed exactly the field it found and no other, so a 4th round found yet another one.
+// This test asserts the general "never throws, always returns a verdict" contract this file's own
+// header comment already claims: first across every TOP-LEVEL object-shaped field verifyBadge()
+// reads from (a field replaced wholesale), then across the specific nested array-typed fields one
+// level down that the top-level sweep can't reach on its own (a field's own SUB-field replaced).
+// Between the two, the NEXT undiscovered malformed field at either level fails HERE generically
+// instead of needing its own bespoke round of review to find. (verifyBadgeWitnessed() is not
+// separately fuzzed here: it delegates all of this structural checking to verifyBadge()
+// internally, and fuzzing it directly would require mocking fetch for every case, which the
+// malformed-badge tests above already cover for the shapes that matter there.)
+test('verifyBadge never throws for any malformed field, top-level or nested, whatever the garbage shape', () => {
+  const GARBAGE = [{}, [], 'x', 42, true, null];
+  const FIELDS = ['log', 'inception', 'keys', 'signatures', 'evidence'];
+  for (const field of FIELDS) {
+    for (const garbage of GARBAGE) {
+      const badge = { schema: 'viaid.badge/0.1', agent_id: 'via_test', assurance_tier: 'SELF', [field]: garbage };
+      assert.doesNotThrow(() => aid.verifyBadge(badge), `verifyBadge crashed with ${field}=${JSON.stringify(garbage)}`);
+      const v = aid.verifyBadge(badge);
+      assert.equal(typeof v.verdict, 'string');
+      assert.ok(Array.isArray(v.confirmed_profiles), `confirmed_profiles must stay an array with ${field}=${JSON.stringify(garbage)}`);
+      assert.ok(Array.isArray(v.downgraded_profiles), `downgraded_profiles must stay an array with ${field}=${JSON.stringify(garbage)}`);
+    }
+  }
+  // Nested one level deeper: `evidence` itself being a well-formed object is exactly the case the
+  // top-level sweep above can't exercise (a `{}` `evidence` has no `.confirmed_profiles` to break
+  // on) — this is the actual shape correctness-3 crashed on.
+  const NESTED_GARBAGE = [{}, 'x', 42, true, null]; // (omit `[]` — that IS the correct type here)
+  for (const garbage of NESTED_GARBAGE) {
+    for (const badge of [{ evidence: { confirmed_profiles: garbage } }, { evidence: { downgraded_profiles: garbage } }]) {
+      assert.doesNotThrow(() => aid.verifyBadge(badge), `verifyBadge crashed on ${JSON.stringify(badge)}`);
+    }
+  }
+});
+
+// correctness-3 [HIGH]: `badge.evidence.confirmed_profiles`/`downgraded_profiles` set to a truthy
+// non-array (e.g. `{}`) crashed the `coverage` computation's `.join()` call — the exact same bug
+// class as the `.log` fixes above, just a different field, which is why the fuzz test above and
+// the shared asArray() helper (src/agentid.mjs) now cover both with one mechanism.
+test('verifyBadge does not crash on malformed badge.evidence.confirmed_profiles/downgraded_profiles', () => {
+  for (const badge of [
+    { evidence: { confirmed_profiles: {}, downgraded_profiles: [] } },
+    { evidence: { confirmed_profiles: 'oops' } },
+    { evidence: { confirmed_profiles: 42 } },
+    { evidence: { confirmed_profiles: [], downgraded_profiles: {} } },
+    { evidence: { confirmed_profiles: [{}], downgraded_profiles: [null] } },
+  ]) {
+    assert.doesNotThrow(() => aid.verifyBadge(badge), `verifyBadge crashed on ${JSON.stringify(badge)}`);
+    const v = aid.verifyBadge(badge);
+    assert.ok(Array.isArray(v.confirmed_profiles));
+    assert.ok(Array.isArray(v.downgraded_profiles));
+  }
+});
+
+// Self-discovered (not from any review round's panel, but surfaced by this round's mutation-
+// testing gate: StrykerJS flagged surviving mutants at the hash-chain walk with zero test coverage
+// tampering it directly). The chain-walk logic itself was already correct — these tests prove it,
+// closing the coverage gap rather than fixing a live bug. Each asserts on the SPECIFIC
+// "log hash-chain intact" step, not just the aggregate verdict, so a mutant that broke only this
+// check (while the badge stayed otherwise valid) would still be caught even if some other check
+// happened to also fail for the same tampered badge.
+test('verifyBadge detects a tampered log entry (hash-chain integrity)', () => {
+  const root = tmpRoot();
+  try {
+    let badge = aid.mintBadge({ name: 'a', workRoot: root });
+    badge = aid.appendLog(badge, root, { action: 'deployed', model_used: 'test-model' });
+    assert.equal(aid.verifyBadge(badge).verdict, 'VALID', 'sanity: untampered badge is VALID first');
+
+    const tampered = JSON.parse(JSON.stringify(badge));
+    tampered.log[0].action = 'something-else'; // mutate a hash-chained field in place
+    const v = aid.verifyBadge(tampered);
+    assert.equal(v.verdict, 'INVALID');
+    const chainStep = v.steps.find((s) => s.step === 'log hash-chain intact');
+    assert.equal(chainStep.status, 'FAIL', 'the hash-chain check itself must catch this, not just some other unrelated check');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('verifyBadge detects a truncated log (a dropped entry breaks the hash chain)', () => {
+  const root = tmpRoot();
+  try {
+    let badge = aid.mintBadge({ name: 'a', workRoot: root });
+    badge = aid.appendLog(badge, root, { action: 'first', model_used: null });
+    badge = aid.appendLog(badge, root, { action: 'second', model_used: null });
+    assert.equal(badge.log.length, 2);
+
+    const truncated = JSON.parse(JSON.stringify(badge));
+    truncated.log = [truncated.log[1]]; // drop the first entry; its prev_hash no longer resolves
+    const v = aid.verifyBadge(truncated);
+    assert.equal(v.verdict, 'INVALID');
+    const chainStep = v.steps.find((s) => s.step === 'log hash-chain intact');
+    assert.equal(chainStep.status, 'FAIL');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// correctness-2 [HIGH]: an HTTP 2xx status alone used to be treated as proof of a successful
+// registration, even when the response body couldn't confirm anything happened server-side.
+test('mintWitnessedBadge rejects a 2xx registration response that does not confirm registration', async () => {
+  const root = tmpRoot();
+  const cases = [
+    { label: 'empty object', json: {} },
+    { label: 'explicit in-body error', json: { status: 'error', error: 'duplicate agent_id' } },
+    { label: 'unparseable body', json: new Error('unexpected token') },
+  ];
+  for (const { label, json } of cases) {
+    await assert.rejects(
+      () => withMockFetch(
+        async () => fakeResponse({ ok: true, status: 201, json }),
+        () => aid.mintWitnessedBadge({ name: 'a', workRoot: root }),
+      ),
+      /did not confirm registration/,
+      `expected a rejection for ${label}`,
+    );
+  }
+  rmSync(root, { recursive: true, force: true });
+});
+
+test('mintWitnessedBadge accepts already_registered:true as a confirmed (idempotent) registration', async () => {
+  const root = tmpRoot();
+  try {
+    const badge = await withMockFetch(
+      async () => fakeResponse({ ok: true, status: 200, json: { already_registered: true } }),
+      () => aid.mintWitnessedBadge({ name: 'a', workRoot: root }),
+    );
+    assert.equal(badge.assurance_tier, 'WITNESSED');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// Self-discovered (not from any review round's panel): step 1 of mintWitnessedBadge() already
+// writes real owner/agent/voucher/next-agent PRIVATE KEY material to workRoot/.keys/<agent_id>.json
+// before the network call that can fail. A failed registration used to leave that file orphaned on
+// disk forever — referenced by no badge, with no command to find or clean it up. Covers three
+// distinct failure modes (non-OK status, service unavailable, unconfirmed-but-2xx) to prove this
+// isn't specific to one error path, and loops to prove failures don't accumulate orphans either.
+test('mintWitnessedBadge cleans up its keystore file when registration fails — no orphaned private keys, even across repeated failures', async () => {
+  const root = tmpRoot();
+  try {
+    const failures = [
+      () => fakeResponse({ ok: false, status: 409, json: { error: 'agent_id already registered with different keys' } }),
+      () => fakeResponse({ ok: false, status: 503 }),
+      () => fakeResponse({ ok: true, status: 201, json: {} }), // 2xx but unconfirmed — must also clean up
+    ];
+    for (let i = 0; i < failures.length; i++) {
+      await assert.rejects(
+        () => withMockFetch(async () => failures[i](), () => aid.mintWitnessedBadge({ name: `agent-${i}`, workRoot: root })),
+      );
+    }
+    const keysDir = join(root, '.keys');
+    const remaining = existsSync(keysDir) ? readdirSync(keysDir) : [];
+    assert.deepEqual(remaining, [], `expected zero orphaned keystore files after repeated failed mint attempts, found: ${remaining.join(', ')}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// security-3/correctness-4 [medium, not gate-blocking — fixed anyway since it's a small, contained
+// addition to code already being touched this round]: the witness-status response was never
+// checked to actually be ABOUT the agent_id just queried — a caching bug, a load-balancer routing
+// mix-up, or a buggy witness deployment ignoring the query param would previously be trusted
+// blindly.
+test('verifyBadgeWitnessed treats a witness response for the WRONG agent_id as untrustworthy (UNREACHABLE)', async () => {
+  const root = tmpRoot();
+  try {
+    const badge = await mintFakeWitnessedBadge(root);
+    const result = await withMockFetch(
+      async () => fakeResponse({ ok: true, status: 200, json: { agent_id: 'via_some_other_agent_entirely', witnessed: false } }),
+      () => aid.verifyBadgeWitnessed(badge),
+    );
+    assert.equal(result.witness_state, 'UNREACHABLE');
+    assert.equal(result.verdict, 'UNKNOWN');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('verifyBadgeWitnessed treats a witness response missing agent_id entirely as untrustworthy (UNREACHABLE)', async () => {
+  const root = tmpRoot();
+  try {
+    const badge = await mintFakeWitnessedBadge(root);
+    const result = await withMockFetch(
+      async () => fakeResponse({ ok: true, status: 200, json: { witnessed: false } }), // no agent_id field at all
+      () => aid.verifyBadgeWitnessed(badge),
+    );
+    assert.equal(result.witness_state, 'UNREACHABLE');
+    assert.equal(result.verdict, 'UNKNOWN');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
