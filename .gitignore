@@ -3,3 +3,4 @@ node_modules/
 viaid-work/
 *.log
 .DS_Store
+.adversarial-review/
