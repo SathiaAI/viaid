@@ -73,11 +73,15 @@ jobs:
       # PR-B hardening: --config auto asked the Semgrep Registry to pick rules based on
       # this project's URL/detected languages at scan time -- opaque from the workflow
       # file alone, and (per semgrep/semgrep#4460) tied to a per-project registry
-      # lookup rather than a fixed, reviewable ruleset. p/ci is Semgrep's own named,
-      # general-purpose CI pack: same no-login/no-paid-account model as before, but the
-      # exact ruleset is now an explicit, stable reference instead of "whatever auto
-      # decides". This narrows non-determinism, it doesn't eliminate it -- p/ci's rule
-      # *content* can still change upstream over time, same as auto's. True hermetic
-      # pinning would mean vendoring rule YAML into the repo, not justified for a
-      # NORMAL-tier gate on a package this size.
-      - run: semgrep scan --config p/ci --error
+      # lookup rather than a fixed, reviewable ruleset. p/default is Semgrep's own docs-
+      # recommended deterministic stand-in for auto (docs.semgrep.dev/kb/semgrep-ci/
+      # ci-vs-cli): same no-login/no-paid-account model as before, but now an explicit,
+      # stable reference in the workflow file. Verified locally before picking this over
+      # p/ci: on this repo auto and p/default both run 237 rules (identical), while p/ci
+      # only runs 29 -- p/ci would have been an ~8x coverage cut versus auto, caught by
+      # the adversarial-review panel (correctness-1/test_quality-2) before merge. This
+      # narrows non-determinism, it doesn't eliminate it -- p/default's rule *content*
+      # can still change upstream over time, same as auto's. True hermetic pinning would
+      # mean vendoring rule YAML into the repo, not justified for a NORMAL-tier gate on a
+      # package this size.
+      - run: semgrep scan --config p/default --error
