@@ -28,19 +28,28 @@ const PROJ_TARGETS = [
   [".devin", ".devin/skills", "Devin (project)"],
 ];
 
+// SAST note (SAT-1007): semgrep's generic path-join-resolve-traversal rule flags the
+// path.join() calls below because it can't see that `e.name` is a directory-entry name
+// returned by fs.readdirSync() on SRC (this package's own install location) — never
+// attacker/network-controlled input. Node's readdirSync never yields "." or ".." entries,
+// so there is no traversal segment for this to carry. Suppressed per-line with the rule
+// id (not the whole tool) so a genuinely tainted path.join() introduced later still gets
+// caught.
 function copyDir(src, dst) {
   fs.mkdirSync(dst, { recursive: true });
   for (const e of fs.readdirSync(src, { withFileTypes: true })) {
     if ([".git", "node_modules", "viaid-work", ".runs"].includes(e.name)) continue;
-    const s = path.join(src, e.name), d = path.join(dst, e.name);
+    const s = path.join(src, e.name), d = path.join(dst, e.name); // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
     e.isDirectory() ? copyDir(s, d) : fs.copyFileSync(s, d);
   }
 }
 
 let installed = 0, skipped = 0;
 function tryInstall(base, detect, skillsDir, label) {
-  if (!fs.existsSync(path.join(base, detect))) return;
-  const dst = path.join(base, skillsDir, "viaid");
+  // `detect`/`skillsDir` come from the fixed USER_TARGETS/PROJ_TARGETS allowlists below
+  // (literal strings in this file), not from argv/env/network input.
+  if (!fs.existsSync(path.join(base, detect))) return; // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
+  const dst = path.join(base, skillsDir, "viaid"); // nosemgrep: javascript.lang.security.audit.path-traversal.path-join-resolve-traversal.path-join-resolve-traversal
   if (fs.existsSync(dst) && !FORCE) {
     console.log(`↷ ${label}: already installed (${dst}) — use --force to overwrite`);
     skipped++; return;
