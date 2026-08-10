@@ -38,6 +38,12 @@ jobs:
       - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Required for org-owned repos (gitleaks/gitleaks-action's own documented setup:
+          # github.com/gitleaks/gitleaks-action#environment-variables) -- SathiaAI is an
+          # organization, so without this the action refuses to run at all, regardless of
+          # whether the GITLEAKS_LICENSE secret exists on the repo. Missed when this job was
+          # first added in SAT-1007; the secret alone wasn't sufficient.
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
   # Split in two (adversarial-review finding security-2): the "-pr" reusable workflow
   # only diffs new-vs-base-branch vulnerabilities and is meant for pull_request events;
