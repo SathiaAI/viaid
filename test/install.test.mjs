@@ -178,5 +178,4 @@ test("install.js --project never copies a .adversarial-review directory into the
     fs.rmSync(proj, { recursive: true, force: true });
     fs.rmSync(fakeHome, { recursive: true, force: true });
   }
-}, {
 });
