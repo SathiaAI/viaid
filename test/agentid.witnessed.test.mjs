@@ -524,6 +524,37 @@ test('verifyBadgeWitnessed does not crash on a malformed but object-shaped badge
   }
 });
 
+// POST-REVIEW FIX (round 6, correctness-2 — confirmed independently by all 5 reviewers this
+// round, zero refutations): the test right above this one calls
+// `verifyBadgeWitnessed({ assurance_tier: 'WITNESSED', inception: {} })` with NO mocked fetch —
+// before this round's fix, that silently sent a real network request to the production default
+// WITNESS_SERVICE_URL on every `npm test` run, and that test's own assertion never caught it
+// because `verdict` stays 'INVALID' whether or not the call actually fires. This test asserts
+// the mechanism directly: fetch must never be invoked at all for a badge that already fails
+// local signature/structure verification, regardless of what `witness_service_url` it names —
+// closing the SSRF-adjacent/data-leak path an attacker-supplied, never-validly-signed badge
+// could otherwise force (arbitrary outbound host, this badge's `agent_id`, and the verifier's
+// own IP/timing, all leaked before there was any reason to believe the badge was real).
+test('verifyBadgeWitnessed never calls fetch for a badge that is already locally INVALID', async () => {
+  let fetchCalls = 0;
+  const badge = {
+    assurance_tier: 'WITNESSED',
+    witness_service_url: 'https://attacker.example', // must never be dialed
+    agent_id: 'via_not-the-real-hash',
+    inception: {},
+    log: [],
+  };
+  await withMockFetch(
+    async () => { fetchCalls++; return fakeResponse({ ok: true, status: 200, json: { agent_id: badge.agent_id, witnessed: false } }); },
+    async () => {
+      const v = await aid.verifyBadgeWitnessed(badge);
+      assert.equal(v.verdict, 'INVALID', 'a structurally-invalid badge must stay INVALID');
+      assert.equal(v.witness_state, 'SKIPPED', 'no online check should be attempted for an already-invalid badge');
+    },
+  );
+  assert.equal(fetchCalls, 0, 'fetch must never be called for a badge that already failed local verification — this is the SSRF/leak vector correctness-2 flagged');
+});
+
 // POST-REVIEW FIX (3rd review round, 4th fix round): plain verifyBadge() threw on a null/
 // undefined/non-object `badge`, and separately crashed on an explicit `null` second argument
 // (default-parameter destructuring only covers `undefined`) -- the exact same two bug classes
@@ -695,11 +726,20 @@ test("verifyBadgeWitnessed defaults to the badge's own recorded witness_service_
   }
 });
 
+// POST-REVIEW FIX (round 6, exposed while fixing correctness-2): this test used to
+// `delete badge.witness_service_url` on an already-signed badge WITHOUT re-signing it — but
+// `witness_service_url` is itself part of the signed core (mintWitnessedBadge sets it, then
+// resigns), so deleting it after the fact is indistinguishable from tampering: verifyBadge()
+// correctly now sees a broken signature (verdict 'INVALID'), which correctness-2's own fix
+// correctly refuses to make an online call for. Fixed by re-signing after the mutation (via the
+// now-exported resign()/loadKeys()) so this fixture is what it claims to be — a VALIDLY SIGNED
+// badge that genuinely predates the witness_service_url field — not a corrupted one.
 test('verifyBadgeWitnessed falls back to the global default witness URL for a pre-existing badge with no witness_service_url field (backward compat)', async () => {
   const root = tmpRoot();
   try {
     const badge = await mintFakeWitnessedBadge(root);
     delete badge.witness_service_url; // simulate a badge minted before this fix shipped
+    aid.resign(badge, aid.loadKeys(root, badge.agent_id)); // ...and re-sign, exactly like a badge that was genuinely minted without this field would legitimately have been
     let calledUrl = null;
     const result = await withMockFetch(
       async (url) => { calledUrl = url; return fakeResponse({ ok: true, status: 200, json: { agent_id: badge.agent_id, witnessed: false } }); },
