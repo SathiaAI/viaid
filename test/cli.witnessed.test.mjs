@@ -185,6 +185,14 @@ test('CLI: init without --witnessed stays SELF-tier and never talks to the witne
     assert.equal(verify.code, 0, `verify exited nonzero: ${verify.stderr}`);
     assert.doesNotMatch(verify.stdout, /witness=/);
 
+    // Bot finding (CodeRabbit nitpick): this test covered `verify` staying offline for a
+    // SELF-tier badge, but not `scan` -- the CLI's other command that branches on assurance_tier
+    // the same way (see bin/viaid.mjs's scan()). A regression that routed SELF-tier `scan`
+    // through verifyBadgeWitnessed() would still have passed this test.
+    const scan = await runCli(['scan', id], env);
+    assert.equal(scan.code, 0, `scan exited nonzero: ${scan.stderr}`);
+    assert.doesNotMatch(scan.stdout, /witness=/);
+
     assert.equal(calls.length, 0, `expected zero witness-service calls for a SELF-tier badge; calls seen: ${calls.join(', ') || '(none)'}`);
   } finally {
     server.close();
