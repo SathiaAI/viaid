@@ -74,6 +74,10 @@ node bin/viaid.mjs verify <id>                # check a badge — VALID / STALE 
 node bin/viaid.mjs rotate <id> [reason]       # rotate the agent key on schedule or after compromise
 ```
 
+For a `--witnessed` badge, `verify`/`scan` also print a live `witness=` result from the hosted
+Witness Service — `CHECKED_CLEAN`, `CHECKED_REVOKED`, `SKIPPED`, or `UNREACHABLE` if the service
+couldn't be reached — alongside the offline VALID/STALE/REVOKED/UNKNOWN verdict above.
+
 See it work end-to-end in under a minute: [live public demo](https://sathiaai.github.io/viaid-demo/).
 
 See `SKILL.md` for the full instructions an AI coding agent follows when this skill is
