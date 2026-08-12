@@ -10,8 +10,16 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      # Bot-review fixes (CodeRabbit + zizmor: credential persistence; Semgrep SAST
+      # yaml.github-actions.security.github-actions-mutable-action-tag, blocking): both actions
+      # were on floating @v4 tags (repointable by the action owner -- supply-chain risk) and
+      # checkout defaulted persist-credentials to true (leaks the job's GITHUB_TOKEN into the
+      # repo's git config for anything run after checkout). Pinned to the exact commit SHAs
+      # already proven-good in ci.yml (SAT-1007/PR-B) rather than re-deriving new ones.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '20'
       - run: node --test
