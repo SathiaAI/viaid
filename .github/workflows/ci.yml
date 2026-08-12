@@ -19,9 +19,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '20'
+          node-version: '24'
       - run: node --test
 
   secrets-scan:
@@ -32,9 +34,16 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Required for org-owned repos (gitleaks/gitleaks-action's own documented setup:
+          # github.com/gitleaks/gitleaks-action#environment-variables) -- SathiaAI is an
+          # organization, so without this the action refuses to run at all, regardless of
+          # whether the GITLEAKS_LICENSE secret exists on the repo. Missed when this job was
+          # first added in SAT-1007; the secret alone wasn't sufficient.
+          GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
 
   # Split in two (adversarial-review finding security-2): the "-pr" reusable workflow
   # only diffs new-vs-base-branch vulnerabilities and is meant for pull_request events;
@@ -65,4 +74,20 @@ jobs:
       image: semgrep/semgrep@sha256:bdf7013b2c3634a487671158da77c554f531742326b543a9464d2adf6c433ac8
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - run: semgrep scan --config auto --error
+        with:
+          persist-credentials: false
+      # PR-B hardening: --config auto asked the Semgrep Registry to pick rules based on
+      # this project's URL/detected languages at scan time -- opaque from the workflow
+      # file alone, and (per semgrep/semgrep#4460) tied to a per-project registry
+      # lookup rather than a fixed, reviewable ruleset. p/default is Semgrep's own docs-
+      # recommended deterministic stand-in for auto (docs.semgrep.dev/kb/semgrep-ci/
+      # ci-vs-cli): same no-login/no-paid-account model as before, but now an explicit,
+      # stable reference in the workflow file. Verified locally before picking this over
+      # p/ci: on this repo auto and p/default both run 237 rules (identical), while p/ci
+      # only runs 29 -- p/ci would have been an ~8x coverage cut versus auto, caught by
+      # the adversarial-review panel (correctness-1/test_quality-2) before merge. This
+      # narrows non-determinism, it doesn't eliminate it -- p/default's rule *content*
+      # can still change upstream over time, same as auto's. True hermetic pinning would
+      # mean vendoring rule YAML into the repo, not justified for a NORMAL-tier gate on a
+      # package this size.
+      - run: semgrep scan --config p/default --error
