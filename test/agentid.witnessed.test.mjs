@@ -614,6 +614,101 @@ test('verifyBadgeWitnessed treats a non-HTTPS witness service URL as an unreacha
 });
 
 // ============================================================================================
+// Bot finding (CodeRabbit correctness-8): which witness a badge was actually registered against
+// was never recorded on the badge itself. Two real consequences, not just missing metadata: (1)
+// a recipient couldn't tell a badge registered against the real, official witness apart from one
+// registered against a throwaway/test instance; (2) verifyBadgeWitnessed() defaulted to the
+// global WITNESS_SERVICE_URL whenever no explicit override was passed, so verifying a badge
+// minted against a NON-default witness (e.g. staging) silently checked the WRONG service instead
+// of the one it was actually registered with.
+// ============================================================================================
+test('mintWitnessedBadge records the witness service URL it actually registered against, on the badge', async () => {
+  const root = tmpRoot();
+  try {
+    const badge = await withMockFetch(
+      async (_url, opts) => {
+        const { inception } = JSON.parse(opts.body);
+        return fakeResponse({ ok: true, status: 201, json: { already_registered: false, agent_id: computeAgentId(inception) } });
+      },
+      () => aid.mintWitnessedBadge({ name: 'a', workRoot: root, witnessServiceUrl: 'https://staging.witness.example.com' }),
+    );
+    assert.equal(badge.witness_service_url, 'https://staging.witness.example.com');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('mintWitnessedBadge records the global default witness URL on the badge when no override is given', async () => {
+  const root = tmpRoot();
+  try {
+    const badge = await mintFakeWitnessedBadge(root);
+    assert.equal(badge.witness_service_url, 'https://witness.viaid.ai');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("verifyBadgeWitnessed defaults to the badge's own recorded witness_service_url, not the global default, when no explicit override is passed", async () => {
+  const root = tmpRoot();
+  try {
+    const badge = await withMockFetch(
+      async (_url, opts) => {
+        const { inception } = JSON.parse(opts.body);
+        return fakeResponse({ ok: true, status: 201, json: { already_registered: false, agent_id: computeAgentId(inception) } });
+      },
+      () => aid.mintWitnessedBadge({ name: 'a', workRoot: root, witnessServiceUrl: 'https://staging.witness.example.com' }),
+    );
+    let calledUrl = null;
+    const result = await withMockFetch(
+      async (url) => { calledUrl = url; return fakeResponse({ ok: true, status: 200, json: { agent_id: badge.agent_id, witnessed: false } }); },
+      () => aid.verifyBadgeWitnessed(badge), // no opts — must NOT fall back to the global default
+    );
+    assert.ok(calledUrl.startsWith('https://staging.witness.example.com'), `expected the badge's own witness URL, got ${calledUrl}`);
+    assert.equal(result.witness_state, 'CHECKED_CLEAN');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('verifyBadgeWitnessed falls back to the global default witness URL for a pre-existing badge with no witness_service_url field (backward compat)', async () => {
+  const root = tmpRoot();
+  try {
+    const badge = await mintFakeWitnessedBadge(root);
+    delete badge.witness_service_url; // simulate a badge minted before this fix shipped
+    let calledUrl = null;
+    const result = await withMockFetch(
+      async (url) => { calledUrl = url; return fakeResponse({ ok: true, status: 200, json: { agent_id: badge.agent_id, witnessed: false } }); },
+      () => aid.verifyBadgeWitnessed(badge),
+    );
+    assert.ok(calledUrl.startsWith('https://witness.viaid.ai'), `expected the global default witness URL, got ${calledUrl}`);
+    assert.equal(result.witness_state, 'CHECKED_CLEAN');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("verifyBadgeWitnessed: an explicit opts.witnessServiceUrl override still wins over the badge's own recorded URL", async () => {
+  const root = tmpRoot();
+  try {
+    const badge = await withMockFetch(
+      async (_url, opts) => {
+        const { inception } = JSON.parse(opts.body);
+        return fakeResponse({ ok: true, status: 201, json: { already_registered: false, agent_id: computeAgentId(inception) } });
+      },
+      () => aid.mintWitnessedBadge({ name: 'a', workRoot: root, witnessServiceUrl: 'https://staging.witness.example.com' }),
+    );
+    let calledUrl = null;
+    await withMockFetch(
+      async (url) => { calledUrl = url; return fakeResponse({ ok: true, status: 200, json: { agent_id: badge.agent_id, witnessed: false } }); },
+      () => aid.verifyBadgeWitnessed(badge, { witnessServiceUrl: 'https://localhost:9999' }),
+    );
+    assert.ok(calledUrl.startsWith('https://localhost:9999'), `expected the explicit override to win, got ${calledUrl}`);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+// ============================================================================================
 // 4th review round findings below. Each is anchored to one specific finding from that round,
 // same pattern as the 2nd/3rd round sections above.
 // ============================================================================================

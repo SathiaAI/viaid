@@ -348,7 +348,20 @@ export async function mintWitnessedBadge(opts) {
 
     // Step 4: only NOW claim WITNESSED — re-sign the whole badge core so the tier change itself is
     // covered by the same whole-badge signature every other field already is.
+    //
+    // POST-REVIEW FIX (bot finding, CodeRabbit correctness-8): which witness this badge was
+    // actually registered against was previously never recorded anywhere on the badge itself —
+    // only ever known to whoever happened to be holding the `witnessServiceUrl` opt at mint time.
+    // Two real consequences, not just a transparency gap: (1) a recipient had no way to tell a
+    // badge registered against a real, official witness apart from one registered against a
+    // throwaway/test instance; (2) verifyBadgeWitnessed() below defaults to the global
+    // WITNESS_SERVICE_URL when no explicit override is passed, so verifying a badge minted
+    // against a NON-default witness (e.g. a staging instance) would silently check the WRONG
+    // service and read back UNREACHABLE/never-heard-of-this-agent — a real correctness bug, not
+    // just missing metadata. Signed (part of the core `resign()` covers), not hashed into
+    // agent_id — recording it doesn't change identity derivation, only after-the-fact disclosure.
     badge.assurance_tier = 'WITNESSED';
+    badge.witness_service_url = witnessServiceUrl;
     return resign(badge, keys);
   } catch (e) {
     // POST-REVIEW FIX (5th round): `badge` may now be unassigned if mintBadge() itself threw
@@ -720,7 +733,15 @@ export async function verifyBadgeWitnessed(badge, opts) {
     };
   }
 
-  const url = witnessServiceUrl || WITNESS_SERVICE_URL;
+  // POST-REVIEW FIX (bot finding, CodeRabbit correctness-8): fall back to the URL THIS BADGE was
+  // actually registered against (now recorded at mint time, see mintWitnessedBadge()'s Step 4)
+  // before falling back further to the global default. Previously an explicit opts override was
+  // the only way to avoid silently checking the wrong service for a badge minted against a
+  // non-default witness (e.g. staging) — omitting the override didn't mean "use this badge's
+  // witness", it meant "use the global default", even when those differed. `badge.witness_service_url`
+  // is undefined for badges minted before this fix, so the final `|| WITNESS_SERVICE_URL` fallback
+  // preserves their existing (global-default) behavior unchanged.
+  const url = witnessServiceUrl || badge.witness_service_url || WITNESS_SERVICE_URL;
   // POST-REVIEW FIX (2nd round): no scheme was checked here either — same plaintext-exposure risk
   // as mintWitnessedBadge(), but verify()'s established contract is "never throw, always return a
   // verdict" (see the badge-shape guard above), so an unsafe URL is treated as just another
