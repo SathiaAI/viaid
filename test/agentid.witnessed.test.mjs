@@ -463,8 +463,15 @@ test('mintWitnessedBadge sends the full inception object (documented, disclosed 
       () => aid.mintWitnessedBadge({ name: 'agent-name', owner: 'owner-identifier', workRoot: root }),
     );
     assert.equal(badge.assurance_tier, 'WITNESSED');
-    assert.equal(sentBody.inception.name, 'agent-name');
-    assert.equal(sentBody.inception.owner_id, 'owner-identifier');
+    // Bot finding (CodeRabbit test_quality, Major/Data Integrity): checking only 2 of inception's
+    // fields individually meant a future change that silently dropped or altered any OTHER field
+    // (owner_pub, agent_pub, voucher_pub, next_key_commitment, key_seq, issued_at, badge_ttl,
+    // schema) would still pass this test -- exactly the fields the witness service's agent_id
+    // binding depends on (see registrationAttestationMessage()'s header comment: the witness
+    // independently recomputes agent_id = hash(canonical(inception)), so any drift here makes
+    // every signature fail server-side verification). Full deep-equal against the actual minted
+    // badge's inception object catches drift in ANY field, not just the two checked before.
+    assert.deepEqual(sentBody.inception, badge.inception, 'the witness must receive the EXACT inception object the badge itself carries, not just name/owner_id');
     assert.ok(sentBody.owner_sig && sentBody.voucher_sig, 'registration must be signed, not bare data');
   } finally {
     rmSync(root, { recursive: true, force: true });
