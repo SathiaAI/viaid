@@ -26,6 +26,24 @@ function withMockFetch(impl, fn) {
   return fn().finally(() => { globalThis.fetch = original; });
 }
 
+// Bot finding (CodeRabbit test_quality, Major): the two stalled-response-body tests below exist
+// specifically to catch a regression in the production abort/timeout wiring (Bug #1). If that
+// exact regression reappeared, the mocked hangUntilAborted response would never settle -- its
+// promise only resolves when the source code's own AbortController fires, and a regression is
+// precisely "the abort never fires" -- so the awaited call would never resolve, and node:test's
+// run would hang on this test instead of failing it. Deliberately NOT the same mechanism as the
+// code under test (that would just duplicate the bug, not catch it): an independent deadline that
+// fails the test on its own terms if the real timeout doesn't fire well within it.
+function withDeadline(promise, ms, label) {
+  let timer;
+  const deadline = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => reject(new Error(
+      `${label}: exceeded this test's own ${ms}ms deadline -- the production timeout/abort path this test exists to check likely regressed`,
+    )), ms);
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
 function tmpRoot() {
   return mkdtempSync(join(tmpdir(), 'viaid-test-'));
 }
@@ -187,7 +205,7 @@ test('verifyBadgeWitnessed times out a stalled response body instead of hanging 
     const start = Date.now();
     const result = await withMockFetch(
       async (_url, opts) => fakeResponse({ ok: true, status: 200, hangUntilAborted: true }, opts?.signal),
-      () => aid.verifyBadgeWitnessed(badge),
+      () => withDeadline(aid.verifyBadgeWitnessed(badge), 2000, 'verifyBadgeWitnessed stalled-body test'),
     );
     const elapsedMs = Date.now() - start;
     assert.ok(elapsedMs < 2000, `expected the stalled body to time out quickly, took ${elapsedMs}ms`);
@@ -207,7 +225,7 @@ test('mintWitnessedBadge times out a stalled registration response body instead 
     await assert.rejects(
       () => withMockFetch(
         async (_url, opts) => fakeResponse({ ok: true, status: 201, hangUntilAborted: true }, opts?.signal),
-        () => aid.mintWitnessedBadge({ name: 'a', workRoot: root }),
+        () => withDeadline(aid.mintWitnessedBadge({ name: 'a', workRoot: root }), 2000, 'mintWitnessedBadge stalled-body test'),
       ),
       (err) => {
         assert.match(err.message, /timed out reading the response body/);
