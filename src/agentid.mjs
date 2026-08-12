@@ -82,7 +82,15 @@ function saveKeys(root, agentId, keys) {
   writeFileSync(p, JSON.stringify(keys, null, 2), { mode: 0o600 });
   chmodSync(p, 0o600);
 }
-function loadKeys(root, agentId) {
+// Exported (round 6): re-signing a badge after a deliberate field-level mutation is a real,
+// legitimate operation this module already performs internally (every rotate/revoke/log/evidence
+// call resigns) — tests need the same ability to construct realistic fixtures (e.g. a pre-existing
+// badge that predates a newly-added signed field) without duplicating the canonical/signing logic
+// inline. This does not expand what's actually possible: a caller must already hold the private
+// keys (i.e. already have filesystem access to workRoot/.keys/, the real security boundary this
+// file's own header comments describe), so exporting the function that re-signs with keys someone
+// already has grants no new capability.
+export function loadKeys(root, agentId) {
   return JSON.parse(readFileSync(keystorePath(root, agentId), 'utf8'));
 }
 // POST-REVIEW FIX (4th round): best-effort cleanup for mintWitnessedBadge()'s rollback path
@@ -109,7 +117,7 @@ function coreForSigning(badge) {
   const { signatures, ...core } = badge;
   return canonical(core);
 }
-function resign(badge, keys) {
+export function resign(badge, keys) {
   const msg = coreForSigning(badge);
   badge.signatures = {
     owner_sig: signB64(keys.owner.priv, msg),
@@ -725,6 +733,34 @@ export async function verifyBadgeWitnessed(badge, opts) {
   // undowngraded base verdict (round 4/5's confirmed security-1/SEC-001 finding, decided by Paul
   // 2026-08-09: downgrade to UNKNOWN, matching the check-failed case).
   const fallbackVerdict = downgradeUnconfirmedVerdict(verdict.verdict);
+
+  // POST-REVIEW FIX (round 6, correctness-2 — independently confirmed by all 5 reviewers this
+  // round, zero refutations): the online witness lookup used to run unconditionally for ANY
+  // WITNESSED-tier-labeled badge, even one whose local signature/structure verification had
+  // already failed (verdict.verdict === 'INVALID') — e.g. a bare, unsigned JSON object an
+  // attacker crafts with `assurance_tier: 'WITNESSED'` and an arbitrary `witness_service_url`.
+  // That let a malformed input that was never validly signed force an outbound HTTPS request
+  // before this function had any reason to believe the badge was real — SSRF-adjacent
+  // (attacker-chosen host) and a data leak (the request carries this badge's `agent_id` and the
+  // verifier's own IP/timing to whatever host the unverified badge names). Concretely
+  // reproduced by this file's own pre-existing malformed-badge test just below, which called
+  // this function with `{ assurance_tier: 'WITNESSED', inception: {} }` and NO mocked fetch —
+  // every `npm test` run was silently making a real network call to the production default
+  // WITNESS_SERVICE_URL for that fixture; its assertion never caught this because verdict stays
+  // 'INVALID' whether or not the call fires. A badge that's already known structurally invalid
+  // gains nothing from an online check — INVALID cannot get worse, and
+  // downgradeUnconfirmedVerdict() already preserves it unchanged — so it's checked first, and
+  // the network path below is only reachable once the badge has at least passed local
+  // signature/structure verification. This is a DIFFERENT fix from security-1/correctness-1
+  // (which is about which witness a *validly-signed* badge gets checked against, once it's
+  // reached the network call at all) — that remains open, pending the repo owner's decision on
+  // a trust-policy approach; see this round's report.
+  if (verdict.verdict === 'INVALID') {
+    return {
+      ...verdict, witness_state: 'SKIPPED',
+      scope_note: `${verdict.scope_note} The online witness check was not attempted because this badge already failed local signature/structure verification — an invalid badge cannot be made valid by an online check, and this avoids an unnecessary outbound request to a witness URL supplied by unverified badge data.`,
+    };
+  }
 
   if (!checkWitness) {
     return {
