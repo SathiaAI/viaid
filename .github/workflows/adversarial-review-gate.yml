@@ -19,23 +19,27 @@ name: Adversarial Review Gate
 #   marking that job "required" in branch protection actually blocks the merge.
 #   SENSITIVE posts a report but the job doesn't fail.
 #
-# NOT YET ACTIVE, and NOT ready to merge as-is -- three real open issues, not
-# guessed past:
+# NOT YET ACTIVE, and NOT ready to merge as-is -- two real open issues remain
+# (the original issue 1 is now resolved; renumbered from three to keep 2 and 3
+# as they were decided/flagged):
 #
-#   1. UNRESOLVED (needs Paul's call): how the adversarial-review skill's files
-#      (SKILL.md + references/ + scripts/, ~132KB / 10 files, currently at
-#      /root/.claude/skills/synced/adversarial-review in interactive sessions)
-#      reach a fresh GitHub Actions runner. Two options, not decided:
-#        (a) vendor a copy into this repo's .claude/skills/adversarial-review/
-#            -- simple, fully self-contained, but a frozen snapshot that won't
-#            pick up skill improvements (Paul mentioned mutation-testing
-#            support is actively being added to this skill elsewhere).
-#        (b) reference it via the claude-code-action's plugin_marketplaces/
-#            plugins inputs if it's distributed from an installable
-#            marketplace -- stays current automatically, but the marketplace
-#            URL/package name isn't known from this sandbox; not guessing one.
-#      The `review` job below has a placeholder step (exit 1) marking exactly
-#      where this needs to be wired once decided.
+#   1. RESOLVED 2026-08-13 (vendored, option (a) from the original note): the
+#      adversarial-review skill's files (SKILL.md + references/ + scripts/, 10
+#      files) are copied into this repo at .claude/skills/adversarial-review/,
+#      verified byte-for-byte (sha256) against the source at
+#      /root/.claude/skills/synced/adversarial-review in the authoring session
+#      -- not retyped, to remove transcription risk for anything this size.
+#      Chosen over the marketplace-reference alternative because it is fully
+#      self-contained with no unknowns; the tradeoff is a frozen snapshot that
+#      will not pick up upstream skill improvements on its own (e.g. the
+#      mutation-testing support Paul mentioned is being added elsewhere) --
+#      re-run the copy manually to pick up updates. Claude Code auto-discovers
+#      repo-local skills from .claude/skills/*/SKILL.md once checked out, so no
+#      further wiring is needed for the claude-code-action step below to find
+#      it. The `review` job's first step now verifies the vendored file is
+#      actually present -- fails loudly if it's ever moved or deleted without
+#      updating this workflow, which is the original placeholder's fail-loud
+#      intent, now checking something real instead of unconditionally failing.
 #
 #   2. KNOWN RISK, not yet mitigated: the skill's Step 5 (release enforcement)
 #      needs `gh api repos/{owner}/{repo}/branches/{branch}/protection`, which
@@ -47,7 +51,10 @@ name: Adversarial Review Gate
 #
 #   3. UNTESTED: --max-turns 40 below is a guess at enough headroom for the
 #      full Step 0-6 pipeline on a real diff; not verified against an actual
-#      run since this can't be executed from this sandbox.
+#      run since this can't be executed from this sandbox. Same caveat now
+#      applies to the vendored skill itself -- this workflow has not yet been
+#      observed actually running panel.py/aggregate.py successfully in a real
+#      GitHub Actions job.
 
 on:
   pull_request:
@@ -110,12 +117,19 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # PLACEHOLDER -- see open issue 1 above. Blocks the job on purpose so
-      # this workflow can't silently pass without the skill actually present.
-      - name: "PLACEHOLDER: make adversarial-review skill available to this runner"
+      # Vendored copy lives at .claude/skills/adversarial-review/ (resolved issue 1,
+      # see file header) and is present in this checkout automatically. This step
+      # only guards against it being moved/deleted later without updating this
+      # workflow -- same fail-loud intent as the placeholder it replaces, now
+      # checking something real instead of unconditionally failing.
+      - name: Verify adversarial-review skill is present
         run: |
-          echo "Not wired yet -- needs Paul's call: vendor into .claude/skills/ vs. plugin marketplace reference. See file header."
-          exit 1
+          test -f .claude/skills/adversarial-review/SKILL.md || {
+            echo "adversarial-review skill not found at .claude/skills/adversarial-review/SKILL.md"
+            echo "Expected a vendored copy (SAT-1014, resolved 2026-08-13) -- see file header."
+            exit 1
+          }
+          echo "Found vendored adversarial-review skill."
 
       - uses: anthropics/claude-code-action@5ef2e550a465a721f4f45e4a7d3c340c873e1dcc # v1
         with:
