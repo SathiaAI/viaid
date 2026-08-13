@@ -1,0 +1,50 @@
+name: Claude Code
+
+# SAT-1014 prep: enables `@claude` mentions in issues/PRs, authenticated as the
+# Claude GitHub App -- a credential path independent of both Composio and this
+# session's blocked git-credential-proxy. This is the foundational enablement
+# piece only; it does NOT wire up adversarial-review or any SAT-1014-specific
+# automation yet -- that's pending Paul's call on blocking semantics, cost-per-PR
+# handling, and risk-tier auto-classification (SAT-1014).
+#
+# NOT ACTIVE until both of these are done (neither is done yet):
+#   1. The Claude GitHub App is installed on this repo (repo-admin action:
+#      https://github.com/apps/claude)
+#   2. An ANTHROPIC_API_KEY (pay-per-use) or CLAUDE_CODE_OAUTH_TOKEN
+#      (subscription, via `claude setup-token`) secret is added to this repo
+#
+# Matches the example workflow from https://code.claude.com/docs/en/github-actions
+# as closely as possible rather than introducing untested deviations -- this
+# file cannot be executed or verified from this sandbox.
+
+on:
+  issue_comment:
+    types: [created]
+  pull_request_review_comment:
+    types: [created]
+
+jobs:
+  claude:
+    if: contains(github.event.comment.body, '@claude')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+      id-token: write
+      actions: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+      # SHA sourced via automated web fetch of the v1 release page (2026-08-13),
+      # not independently cross-verified against the GitHub API -- api.github.com
+      # returned 403 from this sandbox on every attempt. Spot-check against
+      # github.com/anthropics/claude-code-action/releases/tag/v1 before merging,
+      # per this repo's established pin-to-digest convention (see ci.yml).
+      - uses: anthropics/claude-code-action@5ef2e550a465a721f4f45e4a7d3c340c873e1dcc # v1
+        with:
+          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          # If using a Claude subscription instead of API billing, delete the line
+          # above and use instead:
+          # claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
