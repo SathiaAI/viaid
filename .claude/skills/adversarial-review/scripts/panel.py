@@ -210,6 +210,16 @@ def pick_model(candidates):
                                              m["context_length"]), reverse=True)[0]
 
 
+def _require_below_tier_ack(args, actual, requested, risk):
+    if not args.below_tier_ack:
+        die(f"BLOCKED: this panel would run with only {actual}/{requested} "
+            f"{risk}-tier roles -- below what this tier normally requires, not "
+            "just below what was requested. --authorized-by covers 'a smaller "
+            "panel is OK'; this additionally needs --below-tier-ack to confirm "
+            "the reduced scrutiny for this specific tier is understood and "
+            "accepted.", 2)
+
+
 def cmd_assign(args):
     run = resolve_run(args.run)
     meta = read_json(run / "run.json")
@@ -259,9 +269,10 @@ def cmd_assign(args):
     degraded = None
     if missing:
         if args.allow_degraded and args.authorized_by and len(plan) >= 3:
+            _require_below_tier_ack(args, len(plan), len(roles), meta["risk"])
             degraded = {"authorized_by": args.authorized_by,
                         "requested": len(roles), "actual": len(plan),
-                        "missing_roles": missing}
+                        "missing_roles": missing, "below_tier_ack": True}
             roles = [r for r in roles if r in plan]
         else:
             die(f"BLOCKED: only {len(plan)} independent provider families available "
@@ -702,6 +713,10 @@ def main():
     p.add_argument("--pin", action="append", help="role=provider/model-slug")
     p.add_argument("--allow-degraded", action="store_true")
     p.add_argument("--authorized-by", default="")
+    p.add_argument("--below-tier-ack", action="store_true",
+                   help="required with --allow-degraded: confirms the operator knows "
+                        "this panel runs with fewer roles than this risk tier normally "
+                        "requires (not just fewer than the catalog could fill)")
     p.set_defaults(fn=cmd_assign)
 
     p = sub.add_parser("run")

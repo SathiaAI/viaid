@@ -66,7 +66,7 @@ def check_gates(run, tier, fail, blocked, notes):
     return results
 
 
-def check_panel(run, meta, plan, reports, blocked):
+def check_panel(run, meta, plan, reports, blocked, notes):
     roles = list(plan.get("roles", {}))
     if not roles:
         blocked.append("panel plan missing or empty — run `panel.py assign`")
@@ -84,6 +84,22 @@ def check_panel(run, meta, plan, reports, blocked):
     deg = plan.get("degraded")
     if deg and not deg.get("authorized_by"):
         blocked.append("degraded panel without recorded authorization")
+    elif deg and not deg.get("below_tier_ack"):
+        # 'degraded' only exists when actual < requested for THIS tier (see
+        # panel.py cmd_assign) -- authorized_by covers "a smaller panel is OK",
+        # this additionally requires the operator to confirm they understand this
+        # specific tier is getting less scrutiny than it normally requires. A
+        # plan.json from before this field existed, or hand-edited, fails closed.
+        blocked.append(
+            f"panel degraded to {deg.get('actual')}/{deg.get('requested')} roles "
+            f"for {meta['risk']} tier (authorized by {deg.get('authorized_by')}) "
+            "without an explicit below-tier-minimum acknowledgment -- re-run "
+            "`panel.py assign` with --below-tier-ack to accept this explicitly")
+    elif deg:
+        notes.append(
+            f"panel degraded to {deg.get('actual')}/{deg.get('requested')} roles "
+            f"for {meta['risk']} tier, authorized by {deg.get('authorized_by')} "
+            "with explicit below-tier-minimum acknowledgment")
 
 
 REBUTTAL_SCOPE = {
@@ -93,22 +109,45 @@ REBUTTAL_SCOPE = {
 }
 
 
+def _high_critical_by_role(reports):
+    """finding_id -> author role, for every high/critical finding in any report."""
+    return {f["id"]: role for role, rep in reports.items()
+            for f in rep.get("findings", []) if f["severity"] in HIGH}
+
+
 def check_rebuttal(run, meta, plan, reports, blocked, notes):
     """Rebuttal is required when the tier is in the policy's scope AND there is
-    something to contest (high/critical findings). Cost scales with contention."""
+    something to contest (high/critical findings). Cost scales with contention.
+
+    A rebuttal file existing is not enough: REBUTTAL_SCHEMA allows an empty
+    responses list with no minimum, so a model can satisfy the file-exists check
+    with no real cross-examination. This additionally requires every finding a
+    role owes a response to (every high/critical finding some OTHER role
+    authored) to actually appear in that role's responses -- an empty list only
+    passes when there was genuinely nothing for that role to contest."""
     policy = meta.get("rebuttal_policy", "contention")
     scope = REBUTTAL_SCOPE.get(policy, REBUTTAL_SCOPE["contention"])
-    contested = any(f["severity"] in HIGH
-                    for rep in reports.values() for f in rep.get("findings", []))
-    if meta["risk"] not in scope or not contested:
-        if contested:
+    by_role = _high_critical_by_role(reports)
+    if meta["risk"] not in scope or not by_role:
+        if by_role:
             notes.append(f"rebuttal not required at {meta['risk']} under policy '{policy}'")
         return
-    missing = [r for r in plan.get("roles", {})
-               if not (run / "rebuttal" / f"{r}.json").exists()]
-    if missing:
-        blocked.append(f"rebuttal round required (policy '{policy}', risk {meta['risk']}, "
-                       f"high/critical findings present); missing for: {', '.join(missing)}")
+    for role in plan.get("roles", {}):
+        rpath = run / "rebuttal" / f"{role}.json"
+        if not rpath.exists():
+            blocked.append(f"rebuttal round required (policy '{policy}', risk {meta['risk']}, "
+                           f"high/critical findings present); missing for: {role}")
+            continue
+        owed = {fid for fid, author in by_role.items() if author != role}
+        if not owed:
+            continue  # this role authored every high/critical finding itself
+        rec = read_json(rpath)
+        addressed = {r.get("finding_id") for r in rec.get("responses", [])}
+        unaddressed = sorted(owed - addressed)
+        if unaddressed:
+            blocked.append(
+                f"rebuttal for '{role}' does not address: {', '.join(unaddressed)} "
+                "(file exists but has no response for these finding ids)")
 
 
 def author_families(finding_ids, plan):
@@ -228,7 +267,7 @@ def main():
     plan = read_json(plan_path) if plan_path.exists() else {}
     reports = load_reports(run, plan)
     counts["reviewers"] = len(reports)
-    check_panel(run, meta, plan, reports, blocked)
+    check_panel(run, meta, plan, reports, blocked, notes)
     check_rebuttal(run, meta, plan, reports, blocked, notes)
     check_findings(run, meta, plan, reports, fail, blocked, counts)
 

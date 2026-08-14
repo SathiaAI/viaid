@@ -55,6 +55,20 @@ name: Adversarial Review Gate
 #      applies to the vendored skill itself -- this workflow has not yet been
 #      observed actually running panel.py/aggregate.py successfully in a real
 #      GitHub Actions job.
+#
+#   4. RESOLVED 2026-08-14: fork PRs. `on: pull_request` (not pull_request_target,
+#      deliberately -- see below) means GitHub withholds repo secrets, including
+#      CLAUDE_CODE_OAUTH_TOKEN, from runs triggered by a fork-originated PR. Before
+#      this fix that produced a confusing failure indistinguishable from a real
+#      CRITICAL-tier BLOCKED verdict. The `review` job now checks
+#      github.event.pull_request.head.repo.fork immediately after checkout and
+#      fails fast with an honest reason instead. This still fails the check for
+#      fork PRs (no free pass) -- it does not make automated review run for them.
+#      Deliberately NOT switching to pull_request_target to fix that for real:
+#      that trigger hands secrets to workflow runs that check out and can execute
+#      the fork's own (untrusted) code, which is the root cause behind most public
+#      writeups of GitHub Actions secret-exfiltration incidents. viaid doesn't
+#      currently expect outside contributors; revisit if that changes.
 
 on:
   pull_request:
@@ -116,6 +130,28 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+
+      # Resolved issue 4, see file header: fork PRs don't get repo secrets (by
+      # GitHub's own design, not a bug here), so CLAUDE_CODE_OAUTH_TOKEN below
+      # would be empty and the action step would fail confusingly. Fail fast
+      # here instead, with an honest reason -- default GitHub Actions behavior
+      # skips all later steps once one fails, so nothing below this runs.
+      - name: Stop early and clearly if this is a fork PR
+        if: github.event.pull_request.head.repo.fork
+        run: |
+          echo "This PR is from a fork ($HEAD_REPO -> $BASE_REPO)."
+          echo "GitHub does not pass repository secrets (including CLAUDE_CODE_OAUTH_TOKEN)"
+          echo "to pull_request-triggered runs for fork-originated PRs -- that's deliberate,"
+          echo "standard GitHub behavior to stop a malicious PR from exfiltrating secrets,"
+          echo "not a bug in this workflow."
+          echo ""
+          echo "Automated adversarial-review cannot run for this PR as a result. This is NOT"
+          echo "a verdict on the change itself -- it means a maintainer needs to review this"
+          echo "PR manually before merging."
+          exit 1
+        env:
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          BASE_REPO: ${{ github.event.pull_request.base.repo.full_name }}
 
       # Vendored copy lives at .claude/skills/adversarial-review/ (resolved issue 1,
       # see file header) and is present in this checkout automatically. This step

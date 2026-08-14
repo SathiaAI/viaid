@@ -105,8 +105,11 @@ hardcoded list — catalogs churn), excludes every dev provider family, and assi
 to distinct provider families with no collisions. NORMAL runs 3 reviewers (correctness,
 security, test quality); SENSITIVE and CRITICAL run 5 (adds data/privacy, reliability).
 If too few independent families are available the script exits BLOCKED — a smaller panel
-requires explicit user authorization (`--allow-degraded --authorized-by "<user>"`), which
-is recorded and surfaced in the report.
+requires explicit user authorization (`--allow-degraded --authorized-by "<user>"`), and if
+that panel is smaller than what this risk tier normally requires (not just smaller than
+what was requested), it additionally requires `--below-tier-ack` to confirm the reduced
+scrutiny is understood and accepted. Both are recorded and surfaced in the report;
+aggregate.py's verdict BLOCKs a degraded panel missing either.
 
 Then run the panel (direct HTTP transport):
 

@@ -60,14 +60,21 @@ System prompt (per role, assembled by the script):
 User message: run metadata (product, risk tier, requirements, invariants) followed by
 the context file wrapped in randomized UNTRUSTED-CONTENT boundary markers.
 
-## Rebuttal round (CRITICAL tier)
+## Rebuttal round (SENSITIVE and CRITICAL tier, by default policy)
 
-Each reviewer receives the other reviewers' findings (not their summaries — the findings,
-with evidence) and must respond per high/critical finding: `refute` (with
+Required whenever the run's `rebuttal_policy` covers the current risk tier and there
+are high/critical findings to contest -- by default (`policy=contention`) that's
+SENSITIVE and CRITICAL, not CRITICAL alone; `panel.py init --rebuttal-policy critical`
+narrows it back to CRITICAL-only, `any` extends it to NORMAL too. Each reviewer
+receives the other reviewers' findings (not their summaries — the findings, with
+evidence) and must respond per high/critical finding: `refute` (with
 counter-evidence), `corroborate` (with independent evidence or a sharper reproduction),
 or `extend` (the finding is real and worse/wider than reported). "I agree" without
-evidence is treated as no response. Rebuttals inform Step 4 validation; they never
-settle a dispute by themselves — reproduction does.
+evidence is treated as no response, and an empty response list only satisfies the
+requirement for a finding this reviewer had nothing to contest (i.e. every high/critical
+finding was this reviewer's own) -- aggregate.py's check_rebuttal verifies every other
+finding got an actual response, not just that the file exists. Rebuttals inform Step 4
+validation; they never settle a dispute by themselves — reproduction does.
 
 ## Concurrence requests (Step 4 dismissals)
 
