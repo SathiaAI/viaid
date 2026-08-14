@@ -133,7 +133,10 @@ jobs:
 
       - uses: anthropics/claude-code-action@5ef2e550a465a721f4f45e4a7d3c340c873e1dcc # v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # If switching to API-key billing instead of the subscription token,
+          # delete the line above and use instead:
+          # anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
           claude_args: "--max-turns 40"
           prompt: |
             Run the adversarial-review skill against this pull request end to end.

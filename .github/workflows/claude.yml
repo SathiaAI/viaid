@@ -7,15 +7,20 @@ name: Claude Code
 # automation yet -- that's pending Paul's call on blocking semantics, cost-per-PR
 # handling, and risk-tier auto-classification (SAT-1014).
 #
-# NOT ACTIVE until both of these are done (neither is done yet):
-#   1. The Claude GitHub App is installed on this repo (repo-admin action:
-#      https://github.com/apps/claude)
-#   2. An ANTHROPIC_API_KEY (pay-per-use) or CLAUDE_CODE_OAUTH_TOKEN
-#      (subscription, via `claude setup-token`) secret is added to this repo
+# Both setup prerequisites are done as of 2026-08-14:
+#   1. The Claude GitHub App is installed on SathiaAI -- confirmed by Paul via
+#      github.com/settings/applications ("Claude has been installed on 1
+#      account you have access to: SathiaAI").
+#   2. CLAUDE_CODE_OAUTH_TOKEN (subscription token via `claude setup-token`)
+#      is added as a repo secret -- confirmed via the GitHub API (name
+#      present, created 2026-08-14T02:05:46Z; only the name/existence was
+#      checked here, the token value itself was never seen or handled).
 #
 # Matches the example workflow from https://code.claude.com/docs/en/github-actions
-# as closely as possible rather than introducing untested deviations -- this
-# file cannot be executed or verified from this sandbox.
+# as closely as possible rather than introducing untested deviations. STILL
+# UNTESTED end to end: this sandbox can't trigger or observe a GitHub Actions
+# run, so the first real signal will be an actual `@claude` comment on a PR
+# or issue.
 
 on:
   issue_comment:
@@ -44,7 +49,7 @@ jobs:
       # per this repo's established pin-to-digest convention (see ci.yml).
       - uses: anthropics/claude-code-action@5ef2e550a465a721f4f45e4a7d3c340c873e1dcc # v1
         with:
-          anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          # If using a Claude subscription instead of API billing, delete the line
-          # above and use instead:
-          # claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # If switching to API-key billing instead of the subscription token,
+          # delete the line above and use instead:
+          # anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
