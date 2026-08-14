@@ -1,0 +1,164 @@
+name: Adversarial Review Gate
+
+# SAT-1014: automatic risk-tiered adversarial review on every PR. Decisions:
+# Paul, 2026-08-13.
+#
+#   Classification: deterministic path-based job below (`classify`) -- no LLM
+#   call needed just to decide how much scrutiny to apply. CRITICAL = core
+#   identity/mint/verify/witness/CLI-entrypoint logic; NORMAL = tests and docs
+#   only; everything else (including workflow files, package.json, lib/,
+#   scripts/, adapters) defaults to SENSITIVE -- fails safe on the uncertain
+#   middle instead of assuming low risk.
+#
+#   Cost: NORMAL-tier PRs get nothing new here -- they already have ci.yml's
+#   gates plus CodeRabbit. SENSITIVE/CRITICAL run the actual adversarial-review
+#   skill, which needs a real agentic session (Steps 1 and 4 require model
+#   judgment, not just deterministic scripting -- see the skill's own SKILL.md).
+#
+#   Blocking: CRITICAL-tier FAIL/BLOCKED verdicts fail the `review` job, so
+#   marking that job "required" in branch protection actually blocks the merge.
+#   SENSITIVE posts a report but the job doesn't fail.
+#
+# NOT YET ACTIVE, and NOT ready to merge as-is -- two real open issues remain
+# (the original issue 1 is now resolved; renumbered from three to keep 2 and 3
+# as they were decided/flagged):
+#
+#   1. RESOLVED 2026-08-13 (vendored, option (a) from the original note): the
+#      adversarial-review skill's files (SKILL.md + references/ + scripts/, 10
+#      files) are copied into this repo at .claude/skills/adversarial-review/,
+#      verified byte-for-byte (sha256) against the source at
+#      /root/.claude/skills/synced/adversarial-review in the authoring session
+#      -- not retyped, to remove transcription risk for anything this size.
+#      Chosen over the marketplace-reference alternative because it is fully
+#      self-contained with no unknowns; the tradeoff is a frozen snapshot that
+#      will not pick up upstream skill improvements on its own (e.g. the
+#      mutation-testing support Paul mentioned is being added elsewhere) --
+#      re-run the copy manually to pick up updates. Claude Code auto-discovers
+#      repo-local skills from .claude/skills/*/SKILL.md once checked out, so no
+#      further wiring is needed for the claude-code-action step below to find
+#      it. The `review` job's first step now verifies the vendored file is
+#      actually present -- fails loudly if it's ever moved or deleted without
+#      updating this workflow, which is the original placeholder's fail-loud
+#      intent, now checking something real instead of unconditionally failing.
+#
+#   2. KNOWN RISK, not yet mitigated: the skill's Step 5 (release enforcement)
+#      needs `gh api repos/{owner}/{repo}/branches/{branch}/protection`, which
+#      needs administration:read -- not in the Claude GitHub App's standard
+#      permission set. Until resolved, CRITICAL-tier runs may come back BLOCKED
+#      on a permissions gap rather than a real code issue. The skill's own
+#      design treats "can't verify" as BLOCKED (correctly, not silently PASS),
+#      but that's still a false-alarm risk worth fixing before this is required.
+#
+#   3. UNTESTED: --max-turns 40 below is a guess at enough headroom for the
+#      full Step 0-6 pipeline on a real diff; not verified against an actual
+#      run since this can't be executed from this sandbox. Same caveat now
+#      applies to the vendored skill itself -- this workflow has not yet been
+#      observed actually running panel.py/aggregate.py successfully in a real
+#      GitHub Actions job.
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    outputs:
+      tier: ${{ steps.classify.outputs.tier }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: classify
+        run: |
+          # Path-based risk-tier classification (SAT-1014 decision, 2026-08-13).
+          CRITICAL_PATTERNS='^(src/agentid\.mjs|bin/viaid\.mjs)$'
+          NORMAL_PATTERNS='^(test/.*|.*\.md)$'
+
+          CHANGED=$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")
+          echo "Changed files:"
+          echo "$CHANGED"
+
+          TIER="NORMAL"
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if echo "$f" | grep -qE "$CRITICAL_PATTERNS"; then
+              TIER="CRITICAL"
+              break
+            elif echo "$f" | grep -qE "$NORMAL_PATTERNS"; then
+              continue
+            else
+              TIER="SENSITIVE"
+            fi
+          done <<< "$CHANGED"
+
+          echo "Classified tier: $TIER"
+          echo "tier=$TIER" >> "$GITHUB_OUTPUT"
+
+  review:
+    needs: classify
+    if: needs.classify.outputs.tier != 'NORMAL'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+      issues: write
+      id-token: write
+    env:
+      OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Vendored copy lives at .claude/skills/adversarial-review/ (resolved issue 1,
+      # see file header) and is present in this checkout automatically. This step
+      # only guards against it being moved/deleted later without updating this
+      # workflow -- same fail-loud intent as the placeholder it replaces, now
+      # checking something real instead of unconditionally failing.
+      - name: Verify adversarial-review skill is present
+        run: |
+          test -f .claude/skills/adversarial-review/SKILL.md || {
+            echo "adversarial-review skill not found at .claude/skills/adversarial-review/SKILL.md"
+            echo "Expected a vendored copy (SAT-1014, resolved 2026-08-13) -- see file header."
+            exit 1
+          }
+          echo "Found vendored adversarial-review skill."
+
+      - uses: anthropics/claude-code-action@5ef2e550a465a721f4f45e4a7d3c340c873e1dcc # v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # If switching to API-key billing instead of the subscription token,
+          # delete the line above and use instead:
+          # anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
+          claude_args: "--max-turns 40"
+          prompt: |
+            Run the adversarial-review skill against this pull request end to end.
+            Risk tier (already decided, do not reclassify): ${{ needs.classify.outputs.tier }}
+            Diff ref: ${{ github.event.pull_request.base.sha }}...${{ github.event.pull_request.head.sha }}
+            Dev providers: anthropic
+            Follow the skill's Steps 0 through 6 exactly, including Step 4's
+            finding validation -- do not skip validation under time pressure.
+            Write verdict.json per the skill's schema so the next workflow step
+            can read it deterministically.
+
+      - name: Enforce verdict for CRITICAL tier
+        if: needs.classify.outputs.tier == 'CRITICAL'
+        run: |
+          VERDICT_FILE=$(find .adversarial-review -name verdict.json 2>/dev/null | sort | tail -1)
+          if [ -z "$VERDICT_FILE" ]; then
+            echo "No verdict.json produced -- treating as BLOCKED, not silently passing."
+            exit 1
+          fi
+          VERDICT=$(jq -r '.verdict' "$VERDICT_FILE")
+          echo "Verdict: $VERDICT"
+          if [ "$VERDICT" != "PASS" ]; then
+            echo "CRITICAL-tier verdict is $VERDICT -- failing this required check."
+            exit 1
+          fi
