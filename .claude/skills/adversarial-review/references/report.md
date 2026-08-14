@@ -37,9 +37,12 @@ CI rather than run here.>
 classification, evidence one-liner, fix + regression test if confirmed, concurrence if
 dismissed. Then medium/low triage: kept-as-is / fix-later / fixed, one line each.>
 
-## Rebuttal round (CRITICAL only)
+## Rebuttal round (SENSITIVE and CRITICAL tier, by default policy)
 
-<Per contested finding: who refuted/corroborated/extended, and what reproduction settled.>
+<Per contested finding: who refuted/corroborated/extended, and what reproduction
+settled. Required whenever the run's rebuttal_policy covers this risk tier and there
+were high/critical findings to contest (see references/roles.md) -- write
+"N/A -- no high/critical findings" if none arose. Do not leave this blank.>
 
 ## Suppressions and accepted risks
 

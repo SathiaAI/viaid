@@ -22,6 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from _common import family_of, now_iso, read_json, resolve_run, write_json
+from panel import TIER_ROLES
 
 HIGH = ("critical", "high")
 
@@ -81,25 +82,37 @@ def check_panel(run, meta, plan, reports, blocked, notes):
     missing = [r for r in roles if r not in reports]
     if missing:
         blocked.append(f"reviewer reports missing for: {', '.join(missing)}")
+
+    # Ground truth for tier completeness comes from TIER_ROLES, not from whether
+    # plan.get("degraded") happens to be populated -- a missing/hand-edited/older
+    # plan.json could omit that marker while still being short required roles, and
+    # the checks above wouldn't catch it (they only look at the roles actually present).
+    required = set(TIER_ROLES.get(meta["risk"], []))
+    absent = sorted(required - set(roles))
     deg = plan.get("degraded")
     if deg and not deg.get("authorized_by"):
         blocked.append("degraded panel without recorded authorization")
-    elif deg and not deg.get("below_tier_ack"):
-        # 'degraded' only exists when actual < requested for THIS tier (see
-        # panel.py cmd_assign) -- authorized_by covers "a smaller panel is OK",
-        # this additionally requires the operator to confirm they understand this
-        # specific tier is getting less scrutiny than it normally requires. A
-        # plan.json from before this field existed, or hand-edited, fails closed.
-        blocked.append(
-            f"panel degraded to {deg.get('actual')}/{deg.get('requested')} roles "
-            f"for {meta['risk']} tier (authorized by {deg.get('authorized_by')}) "
-            "without an explicit below-tier-minimum acknowledgment -- re-run "
-            "`panel.py assign` with --below-tier-ack to accept this explicitly")
-    elif deg:
-        notes.append(
-            f"panel degraded to {deg.get('actual')}/{deg.get('requested')} roles "
-            f"for {meta['risk']} tier, authorized by {deg.get('authorized_by')} "
-            "with explicit below-tier-minimum acknowledgment")
+    elif absent:
+        if not deg or not deg.get("authorized_by"):
+            blocked.append(
+                f"panel incomplete for {meta['risk']} tier: missing roles "
+                f"{', '.join(absent)}, without recorded degraded authorization")
+        elif not deg.get("below_tier_ack"):
+            # 'degraded' only exists when actual < requested for THIS tier (see
+            # panel.py cmd_assign) -- authorized_by covers "a smaller panel is OK",
+            # this additionally requires the operator to confirm they understand this
+            # specific tier is getting less scrutiny than it normally requires. A
+            # plan.json from before this field existed, or hand-edited, fails closed.
+            blocked.append(
+                f"panel degraded to {len(roles)}/{len(required)} roles "
+                f"for {meta['risk']} tier (authorized by {deg['authorized_by']}) "
+                "without an explicit below-tier-minimum acknowledgment -- re-run "
+                "`panel.py assign` with --below-tier-ack to accept this explicitly")
+        else:
+            notes.append(
+                f"panel degraded to {len(roles)}/{len(required)} roles "
+                f"for {meta['risk']} tier, authorized by {deg['authorized_by']} "
+                "with explicit below-tier-minimum acknowledgment")
 
 
 REBUTTAL_SCOPE = {
@@ -213,8 +226,11 @@ def check_findings(run, meta, plan, reports, fail, blocked, counts):
             if conc.get("agrees_false_positive") is not True:
                 blocked.append(f"validation/{name}: false_positive on high/critical "
                                "without an agreeing concurrence from an uninvolved model")
+            elif not conc.get("model_id"):
+                blocked.append(f"validation/{name}: false_positive concurrence has no "
+                               "identified model_id -- cannot verify independence")
             else:
-                cfam = family_of(conc.get("model_id", "unknown/unknown"))
+                cfam = family_of(conc["model_id"])
                 bad = author_families(ids, plan) | dev
                 if cfam in bad:
                     blocked.append(f"validation/{name}: concurrence model family "

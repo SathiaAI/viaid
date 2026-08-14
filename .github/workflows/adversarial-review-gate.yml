@@ -187,13 +187,26 @@ jobs:
       - name: Enforce verdict for CRITICAL tier
         if: needs.classify.outputs.tier == 'CRITICAL'
         run: |
-          VERDICT_FILE=$(find .adversarial-review -name verdict.json 2>/dev/null | sort | tail -1)
-          if [ -z "$VERDICT_FILE" ]; then
-            echo "No verdict.json produced -- treating as BLOCKED, not silently passing."
+          # Only trust a verdict.json under a real run directory (.adversarial-review/run-*/),
+          # and require there be exactly one. .adversarial-review/ is normally gitignored, but
+          # a malicious contributor can `git add -f` a decoy file into it (e.g.
+          # .adversarial-review/zz/verdict.json with {"verdict":"PASS"}), and plain
+          # `sort | tail -1` glob would pick "zz" over "run-..." since z > r lexicographically.
+          # Zero or multiple matches BLOCK instead of guessing.
+          mapfile -t VERDICT_FILES < <(find .adversarial-review -mindepth 2 -maxdepth 2 \
+            -path '.adversarial-review/run-*/verdict.json' 2>/dev/null | sort)
+          if [ "${#VERDICT_FILES[@]}" -eq 0 ]; then
+            echo "No verdict.json produced under a run-* directory -- treating as BLOCKED, not silently passing."
             exit 1
           fi
+          if [ "${#VERDICT_FILES[@]}" -gt 1 ]; then
+            echo "Multiple run-*/verdict.json files found -- ambiguous, treating as BLOCKED:"
+            printf '  %s\n' "${VERDICT_FILES[@]}"
+            exit 1
+          fi
+          VERDICT_FILE="${VERDICT_FILES[0]}"
           VERDICT=$(jq -r '.verdict' "$VERDICT_FILE")
-          echo "Verdict: $VERDICT"
+          echo "Verdict ($VERDICT_FILE): $VERDICT"
           if [ "$VERDICT" != "PASS" ]; then
             echo "CRITICAL-tier verdict is $VERDICT -- failing this required check."
             exit 1
