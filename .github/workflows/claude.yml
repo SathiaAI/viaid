@@ -42,6 +42,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 1
+          persist-credentials: false
       # SHA sourced via automated web fetch of the v1 release page (2026-08-13),
       # not independently cross-verified against the GitHub API -- api.github.com
       # returned 403 from this sandbox on every attempt. Spot-check against

@@ -21,6 +21,7 @@ import secrets
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -131,15 +132,32 @@ def api_config():
     return base, key
 
 
+_LOOPBACK_HOSTS = {"localhost", "127.0.0.1", "::1"}
+
+
+def _check_url_scheme(url):
+    """Only allow https (or http to loopback) before urlopen() opens this URL."""
+    parts = urllib.parse.urlsplit(url)
+    if parts.scheme == "https":
+        return
+    if parts.scheme == "http" and parts.hostname in _LOOPBACK_HOSTS:
+        return
+    msg = (f"refusing to call {parts.scheme!r} URL {url!r} -- only https:// is "
+           "allowed (plain http:// is allowed for localhost/127.0.0.1 only). Set "
+           "AR_BASE_URL to an https:// endpoint.")
+    raise ValueError(msg)
+
+
 def http_json(url, payload=None, key=None, timeout=None):
+    _check_url_scheme(url)
     timeout = timeout or int(os.environ.get("AR_TIMEOUT_S", "240"))
     headers = {"Content-Type": "application/json"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
     data = json.dumps(payload).encode() if payload is not None else None
-    req = urllib.request.Request(url, data=data, headers=headers,
+    req = urllib.request.Request(url, data=data, headers=headers,  # noqa: S310 -- scheme validated above
                                  method="POST" if data else "GET")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected -- scheme validated above
         return json.loads(resp.read().decode())
 
 
