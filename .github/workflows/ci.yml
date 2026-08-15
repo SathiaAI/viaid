@@ -15,15 +15,23 @@ permissions:
   contents: read
 
 jobs:
+  # Consolidated from a duplicate `test` job that previously lived in test.yml (Node 20
+  # only, now deleted). package.json declares "engines": { "node": ">=18" }, but neither
+  # the old test.yml nor this job alone ever actually tested that floor -- this matrix
+  # tests the declared minimum (18) and the version used by the rest of this pipeline
+  # (24) in one named check instead of two same-named, divergent ones.
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        node-version: ['18', '24']
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: '24'
+          node-version: ${{ matrix.node-version }}
       - run: node --test
 
   secrets-scan:
