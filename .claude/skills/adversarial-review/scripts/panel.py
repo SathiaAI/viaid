@@ -133,13 +133,18 @@ def api_config():
 
 def http_json(url, payload=None, key=None, timeout=None):
     timeout = timeout or int(os.environ.get("AR_TIMEOUT_S", "240"))
+    if not url.startswith(("https://", "http://")):
+        # Blocks file:// and other schemes urllib would otherwise happily open.
+        raise ValueError(f"http_json: refusing non-http(s) URL scheme: {url!r}")
     headers = {"Content-Type": "application/json"}
     if key:
         headers["Authorization"] = f"Bearer {key}"
     data = json.dumps(payload).encode() if payload is not None else None
     req = urllib.request.Request(url, data=data, headers=headers,
                                  method="POST" if data else "GET")
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
+    # Scheme is allowlisted to http(s) above; url is sourced from AR_BASE_URL env var or the
+    # DEFAULT_BASE constant (api_config()), not from user/request input.
+    with urllib.request.urlopen(req, timeout=timeout) as resp:  # nosemgrep: python.lang.security.audit.dynamic-urllib-use-detected.dynamic-urllib-use-detected
         return json.loads(resp.read().decode())
 
 
