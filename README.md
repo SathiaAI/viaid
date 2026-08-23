@@ -126,6 +126,12 @@ with real consequences), not every internal model thought. Wrapping every functi
 A forged or altered badge fails at least one verification step — the identity hash won't match,
 a signature won't check out, or the log's hash chain will break at the altered entry.
 
+**Does `report`'s "active" count mean those badges are still valid?**
+No — `report` reflects each badge's own stored `revocation_state` (REVOKED or not), from a fast
+read-only sweep of the directory. It does not re-check signatures or TTL freshness, so a STALE
+or otherwise INVALID badge still counts as "active" there. Run `verify <id>` for the real,
+per-badge verdict.
+
 **Do I need to trust VIA ID (the company) to verify a badge?**
 No. Verification is fully offline once you have the badge file or its rendered page —
 `verify` doesn't call any VIA ID server to check signatures or log integrity. Only *minting* or

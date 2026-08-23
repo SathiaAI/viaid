@@ -7,7 +7,7 @@
 // KnoSky are reached through adapter seams (src/adapters/*) that point at the installed
 // packages in production and at the cloned repos here (GRAPHSMITH_HOME / KNOSKY_HOME).
 
-import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, lstatSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as aid from '../src/agentid.mjs';
@@ -70,24 +70,39 @@ const cmds = {
   // running VIA ID for its own internal fleet) — no network call, no data leaves this
   // directory. Walks *.badge.json files already sitting here and tallies them; does not
   // change verify/mint/revoke behavior or touch anything outside `dir`.
+  //
+  // "active" reflects each badge's own stored `revocation_state` (REVOKED vs. not) — it is
+  // NOT a live freshness/signature check. A badge whose TTL has lapsed (STALE) or whose
+  // signature no longer verifies (INVALID) still counts as active here; run `verify <id>`
+  // for the real per-badge verdict. Deliberate: report is a fast, read-only sweep across a
+  // whole directory, not a per-badge verification pass.
   report([dir = ROOT]) {
     if (!existsSync(dir)) throw new Error(`no such directory: ${dir}`);
     const files = readdirSync(dir).filter((f) => f.endsWith('.badge.json'));
     const counts = { total: 0, skipped: 0, active: 0, revoked: 0, byTier: {} };
     for (const f of files) {
+      const full = join(dir, f);
       let badge;
       try {
-        badge = aid.loadBadge(join(dir, f));
+        // lstat, not stat: see the entry itself rather than following a symlink. A badge
+        // report should only ever reflect files actually inside `dir` — not whatever a
+        // symlink happens to point at — and a plain read must never risk blocking on a
+        // special file (e.g. a named pipe) sitting where a badge file is expected.
+        if (!lstatSync(full).isFile()) throw new Error('not a regular file (symlink or special file)');
+        badge = aid.loadBadge(full);
+        if (badge === null || typeof badge !== 'object' || Array.isArray(badge)) {
+          throw new Error('badge JSON must be an object');
+        }
+        counts.total++;
+        const tier = badge.assurance_tier || 'unknown';
+        counts.byTier[tier] = (counts.byTier[tier] || 0) + 1;
+        if (badge.revocation_state === 'REVOKED') counts.revoked++;
+        else counts.active++;
       } catch (e) {
         log(`⚠ skipping ${f}: ${e.message}`);
         counts.skipped++;
         continue;
       }
-      counts.total++;
-      const tier = badge.assurance_tier || 'unknown';
-      counts.byTier[tier] = (counts.byTier[tier] || 0) + 1;
-      if (badge.revocation_state === 'REVOKED') counts.revoked++;
-      else counts.active++;
     }
     log(`Badges in ${dir}: ${counts.total}  (active ${counts.active}, revoked ${counts.revoked}, ${counts.skipped} file(s) skipped)`);
     for (const [tier, n] of Object.entries(counts.byTier)) log(`  ${tier}: ${n}`);

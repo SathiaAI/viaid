@@ -103,6 +103,58 @@ test("report on a nonexistent directory fails loudly rather than silently report
   );
 });
 
+test("report skips a null badge file with a warning instead of crashing the whole command", () => {
+  // Regression test: JSON.parse("null") succeeds and returns `null`, so a *.badge.json file
+  // containing exactly `null` used to pass loadBadge() untouched, then crash the entire
+  // report (outside any per-file try/catch) the moment its properties were read.
+  const dir = tmpDir("viaid-report-null-");
+  try {
+    fs.writeFileSync(path.join(dir, "good.badge.json"), fakeBadge({ tier: "SELF" }));
+    fs.writeFileSync(path.join(dir, "null.badge.json"), "null");
+
+    const output = runReport(dir);
+
+    assert.match(output, /⚠ skipping null\.badge\.json/, "should warn about the null-valued file by name");
+    assert.match(output, /Badges in .*: 1\s+\(active 1, revoked 0, 1 file\(s\) skipped\)/, "a file containing only `null` must not crash the report or count toward the total");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("report skips a badge file whose JSON is an array rather than an object", () => {
+  const dir = tmpDir("viaid-report-array-");
+  try {
+    fs.writeFileSync(path.join(dir, "good.badge.json"), fakeBadge({ tier: "SELF" }));
+    fs.writeFileSync(path.join(dir, "array.badge.json"), "[1,2,3]");
+
+    const output = runReport(dir);
+
+    assert.match(output, /⚠ skipping array\.badge\.json/, "should warn about the array-shaped file by name");
+    assert.match(output, /Badges in .*: 1\s+\(active 1, revoked 0, 1 file\(s\) skipped\)/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("report does not follow a symlink to read badge data from outside the scanned directory", () => {
+  const dir = tmpDir("viaid-report-symlink-");
+  const outside = tmpDir("viaid-report-outside-");
+  try {
+    fs.writeFileSync(path.join(dir, "good.badge.json"), fakeBadge({ tier: "SELF" }));
+    const externalBadge = path.join(outside, "external.badge.json");
+    fs.writeFileSync(externalBadge, fakeBadge({ tier: "WITNESSED" }));
+    fs.symlinkSync(externalBadge, path.join(dir, "linked.badge.json"));
+
+    const output = runReport(dir);
+
+    assert.match(output, /⚠ skipping linked\.badge\.json/, "a symlink must be skipped, not followed, to keep data from outside dir out of the count");
+    assert.match(output, /Badges in .*: 1\s+\(active 1, revoked 0, 1 file\(s\) skipped\)/, "only the one real file inside dir should count");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(outside, { recursive: true, force: true });
+  }
+});
+
 test("report never writes into or otherwise mutates the directory it scans", () => {
   const dir = tmpDir("viaid-report-readonly-");
   try {
