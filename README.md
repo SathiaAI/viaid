@@ -71,6 +71,7 @@ node bin/viaid.mjs init "my-agent"      # mint a badge once, when the agent ship
 node bin/viaid.mjs log <id> "did-thing" # the agent's own runtime calls this after each action
 node bin/viaid.mjs verify <id>          # check a badge — VALID / STALE / REVOKED / UNKNOWN
 node bin/viaid.mjs rotate <id> [reason] # rotate the agent key on schedule or after compromise
+node bin/viaid.mjs report [dir]         # local badge count for this workRoot — no network call
 ```
 
 See it work end-to-end in under a minute: [live public demo](https://sathiaai.github.io/viaid-demo/).

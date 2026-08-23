@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // VIA ID — thin runnable prototype CLI.
-// S2 (dev): init · log · eval · verify        S1 (org): scan · gate · revoke
+// S2 (dev): init · log · eval · verify · report        S1 (org): scan · gate · revoke
 // `demo` runs the whole two-sided flow end-to-end against the REAL GraphSmith + KnoSky.
 //
 // NOT throwaway: the badge layer (src/agentid.mjs) is production-path; GraphSmith and
 // KnoSky are reached through adapter seams (src/adapters/*) that point at the installed
 // packages in production and at the cloned repos here (GRAPHSMITH_HOME / KNOSKY_HOME).
 
-import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as aid from '../src/agentid.mjs';
@@ -65,6 +65,33 @@ const cmds = {
     log(`Scope:    ${v.scope_note}`);
     for (const s of v.steps) log(`  [${s.status}] ${s.step}${s.detail ? ' — ' + s.detail : ''}`);
     return v;
+  },
+  // Local-only badge count for whoever operates this workRoot (a solo dev, or a company
+  // running VIA ID for its own internal fleet) — no network call, no data leaves this
+  // directory. Walks *.badge.json files already sitting here and tallies them; does not
+  // change verify/mint/revoke behavior or touch anything outside `dir`.
+  report([dir = ROOT]) {
+    if (!existsSync(dir)) throw new Error(`no such directory: ${dir}`);
+    const files = readdirSync(dir).filter((f) => f.endsWith('.badge.json'));
+    const counts = { total: 0, skipped: 0, active: 0, revoked: 0, byTier: {} };
+    for (const f of files) {
+      let badge;
+      try {
+        badge = aid.loadBadge(join(dir, f));
+      } catch (e) {
+        log(`⚠ skipping ${f}: ${e.message}`);
+        counts.skipped++;
+        continue;
+      }
+      counts.total++;
+      const tier = badge.assurance_tier || 'unknown';
+      counts.byTier[tier] = (counts.byTier[tier] || 0) + 1;
+      if (badge.revocation_state === 'REVOKED') counts.revoked++;
+      else counts.active++;
+    }
+    log(`Badges in ${dir}: ${counts.total}  (active ${counts.active}, revoked ${counts.revoked}, ${counts.skipped} file(s) skipped)`);
+    for (const [tier, n] of Object.entries(counts.byTier)) log(`  ${tier}: ${n}`);
+    return counts;
   },
   // ---------- S1: org runs the desk on an inbound agent ----------
   scan([id]) {
@@ -138,7 +165,7 @@ const cmds = {
 const [cmd, ...args] = process.argv.slice(2);
 const fn = cmds[cmd];
 if (!fn) {
-  log('viaid — thin prototype\n  S2: init <name> · log <id> <action> · rotate <id> [reason|compromise] [suspected_since] · eval <id> <dir> · verify <id>\n  S1: scan <id> · gate <id> [dest] · (revoke via demo)\n  demo  — full two-sided flow');
+  log('viaid — thin prototype\n  S2: init <name> · log <id> <action> · rotate <id> [reason|compromise] [suspected_since] · eval <id> <dir> · verify <id> · report [dir]\n  S1: scan <id> · gate <id> [dest] · (revoke via demo)\n  demo  — full two-sided flow');
   process.exit(cmd ? 1 : 0);
 }
 try { await fn(args); }
