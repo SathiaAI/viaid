@@ -7,7 +7,7 @@
 // KnoSky are reached through adapter seams (src/adapters/*) that point at the installed
 // packages in production and at the cloned repos here (GRAPHSMITH_HOME / KNOSKY_HOME).
 
-import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, lstatSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, openSync, fstatSync, readFileSync, closeSync, constants as fsConstants } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as aid from '../src/agentid.mjs';
@@ -83,13 +83,19 @@ const cmds = {
     for (const f of files) {
       const full = join(dir, f);
       let badge;
+      let fd;
       try {
-        // lstat, not stat: see the entry itself rather than following a symlink. A badge
-        // report should only ever reflect files actually inside `dir` — not whatever a
-        // symlink happens to point at — and a plain read must never risk blocking on a
-        // special file (e.g. a named pipe) sitting where a badge file is expected.
-        if (!lstatSync(full).isFile()) throw new Error('not a regular file (symlink or special file)');
-        badge = aid.loadBadge(full);
+        // Open once with O_NOFOLLOW + O_NONBLOCK and work from that single descriptor,
+        // rather than checking the path (lstat) and then reading the path again — two
+        // separate pathname lookups leave a window where the entry could be swapped for
+        // a symlink in between the check and the read. O_NOFOLLOW makes the open itself
+        // fail (ELOOP) on a symlink; O_NONBLOCK keeps it from blocking if a special file
+        // like a named pipe sits here instead. fstat on the resulting descriptor is immune
+        // to any further swap at the path, since it's already bound to the exact file we
+        // opened, not to whatever the path currently resolves to.
+        fd = openSync(full, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+        if (!fstatSync(fd).isFile()) throw new Error('not a regular file (symlink or special file)');
+        badge = JSON.parse(readFileSync(fd, 'utf8'));
         if (badge === null || typeof badge !== 'object' || Array.isArray(badge)) {
           throw new Error('badge JSON must be an object');
         }
@@ -99,9 +105,12 @@ const cmds = {
         if (badge.revocation_state === 'REVOKED') counts.revoked++;
         else counts.active++;
       } catch (e) {
-        log(`⚠ skipping ${f}: ${e.message}`);
+        const reason = e.code === 'ELOOP' ? 'not a regular file (symlink or special file)' : e.message;
+        log(`⚠ skipping ${f}: ${reason}`);
         counts.skipped++;
         continue;
+      } finally {
+        if (fd !== undefined) closeSync(fd);
       }
     }
     log(`Badges in ${dir}: ${counts.total}  (active ${counts.active}, revoked ${counts.revoked}, ${counts.skipped} file(s) skipped)`);
