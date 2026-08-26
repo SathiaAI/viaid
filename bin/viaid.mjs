@@ -78,6 +78,15 @@ const cmds = {
   // whole directory, not a per-badge verification pass.
   report([dir = ROOT]) {
     if (!existsSync(dir)) throw new Error(`no such directory: ${dir}`);
+    // O_NOFOLLOW/O_NONBLOCK are POSIX flags; Node leaves them undefined on platforms that
+    // don't support them (Windows). Left unchecked, `fsConstants.O_NOFOLLOW | ...` below
+    // would silently coerce a missing flag to 0 — the open would quietly stop refusing
+    // symlinks instead of erroring, so the scan would *look* protected while it isn't.
+    // Fail closed here, once, up front: refuse to scan rather than run with that guard
+    // silently missing.
+    if (!Number.isInteger(fsConstants.O_NOFOLLOW) || !Number.isInteger(fsConstants.O_NONBLOCK)) {
+      throw new Error(`report needs O_NOFOLLOW/O_NONBLOCK support to safely open badge files, which ${process.platform} doesn't provide — refusing to scan rather than silently lose the symlink guard`);
+    }
     const files = readdirSync(dir).filter((f) => f.endsWith('.badge.json'));
     const counts = { total: 0, skipped: 0, active: 0, revoked: 0, byTier: {} };
     for (const f of files) {

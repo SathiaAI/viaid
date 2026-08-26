@@ -155,7 +155,10 @@ test("report does not follow a symlink to read badge data from outside the scann
   }
 });
 
-test("report skips a named pipe (FIFO) without hanging, now that it's opened rather than just lstat'd", () => {
+test(
+  "report skips a named pipe (FIFO) without hanging, now that it's opened rather than just lstat'd",
+  { skip: process.platform === "win32" ? "mkfifo is POSIX-only, and report itself now refuses to run on platforms without O_NOFOLLOW/O_NONBLOCK" : false },
+  () => {
   // Regression test for the O_NOFOLLOW/O_NONBLOCK hardening: report now opens each file
   // (rather than lstat-then-read on the path) to close a symlink-swap race window. That
   // means a special file like a named pipe is genuinely opened, not just stat'd, so this
