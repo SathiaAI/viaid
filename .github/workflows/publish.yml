@@ -36,13 +36,32 @@ jobs:
           registry-url: 'https://registry.npmjs.org'
           package-manager-cache: false # never cache in a release build (npm's own recommendation)
 
+      # Fail fast, before doing any install/build/test work, if the pushed tag and
+      # package.json disagree: `npm publish` always publishes whatever version package.json
+      # says, regardless of what the triggering tag was named, so a tag pushed without first
+      # bumping package.json would otherwise silently publish under the wrong version (or fail
+      # opaquely if that version is already on the registry).
+      - name: Verify tag matches package.json version
+        run: |
+          tag_version="${GITHUB_REF_NAME#v}"
+          pkg_version="$(node -p "require('./package.json').version")"
+          if [ "$tag_version" != "$pkg_version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME (version $tag_version) does not match package.json version $pkg_version" >&2
+            exit 1
+          fi
+
       # Trusted Publishing requires npm CLI >= 11.5.1 (docs.npmjs.com/trusted-publishers/).
       # Node 24's bundled npm clears that bar today, but pin the floor explicitly here rather
       # than depend on whatever happens to ship with the runner's Node install at publish time --
       # a real-world report of this exact gap is cited in the PR description.
       - run: npm install -g npm@latest
 
-      - run: npm ci
+      # Not `npm ci`: this repo has no committed package-lock.json today (SAT-1009, still
+      # unmerged as of this writing, introduces the project's first-ever dependency and its
+      # lockfile), and `npm ci` hard-requires a lockfile to be present regardless of whether
+      # there's anything to install -- it exits EUSAGE without one. `npm install` works with or
+      # without a lockfile, so this keeps working before and after that lockfile exists.
+      - run: npm install
 
       - run: npm run build --if-present
 
