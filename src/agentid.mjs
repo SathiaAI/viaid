@@ -225,7 +225,36 @@ export function revokeBadge(badge, workRoot, reason = 'revoked') {
 }
 
 // ---- verify (viaid verify / scan) → honest verdict ----
+// Fail-closed shape for a badge verifyBadgeInner() couldn't even get through (crashed on
+// malformed/hostile input, or wasn't even a plain object) — same keys as a normal verdict, so
+// callers (CLI, verify-page renderer) never have to special-case a crash vs. a genuine INVALID.
+// SAT-1009: fuzzing this entry point showed it threw uncaught on adversarial-but-JSON-decodable
+// input (`null`, a badge with a non-array `.log`, `evidence.confirmed_profiles` present but not
+// an array, ...) instead of failing cleanly. Mirrors the equivalent guard already reviewed and
+// shipped in skill/src/agentid.mjs's verifyBadge()/verifyBadgeInner() split (its own SAT-958
+// adversarial-review pass) — that fix was never ported to this copy; this closes that gap here.
+function invalidVerdict(reason) {
+  return {
+    verdict: 'INVALID', agent_id: null, assurance_tier: null,
+    coverage: 'no evaluation attached (identity + log only)',
+    scope_note: 'This verdict attests identity, signatures, and log integrity — not the safety, correctness, or compliance of the agent.',
+    confirmed_profiles: [], downgraded_profiles: [],
+    key_seq: 0, last_rotation_reason: null, last_rotation_at: null,
+    freshness_state: 'INVALID',
+    steps: [{ step: 'verify', status: 'FAIL', detail: reason }],
+  };
+}
+
 export function verifyBadge(badge) {
+  if (!badge || typeof badge !== 'object') return invalidVerdict('badge JSON must be an object');
+  try {
+    return verifyBadgeInner(badge);
+  } catch (e) {
+    return invalidVerdict('verify crashed on malformed/hostile input: ' + (e && e.message ? e.message : String(e)));
+  }
+}
+
+function verifyBadgeInner(badge) {
   const steps = [];
   const push = (step, ok, detail) => steps.push({ step, status: ok ? 'PASS' : 'FAIL', detail });
   const inc = badge.inception || {};

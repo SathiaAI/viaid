@@ -1,0 +1,46 @@
+{
+  "schema": "viaid.badge/0.1",
+  "agent_id": "via_c92ff7467675c30f58662a30457e6105",
+  "inception": {
+    "schema": "viaid.badge/0.1",
+    "name": "fuzz-seed-evidence",
+    "owner_id": "local-dev",
+    "owner_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "agent_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "voucher_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "next_key_commitment": "04800d6cfcf2def4889c1b462f66bf4f76a14d69d94e1c88d7e202f0ebf841c8",
+    "key_seq": 0,
+    "issued_at": "2026-08-28T00:00:00.000Z",
+    "badge_ttl": 7776000
+  },
+  "keys": {
+    "owner_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "agent_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "voucher_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ=="
+  },
+  "key_seq": 0,
+  "next_key_commitment": "04800d6cfcf2def4889c1b462f66bf4f76a14d69d94e1c88d7e202f0ebf841c8",
+  "last_rotation_reason": null,
+  "last_rotation_at": null,
+  "assurance_tier": "SELF",
+  "revocation_state": "FRESH",
+  "evidence": {
+    "engine": "graphsmith-skill verify.js (0.1)",
+    "status": "PASS",
+    "confirmed_profiles": [
+      "A",
+      "B"
+    ],
+    "downgraded_profiles": [
+      "C"
+    ],
+    "note": "fuzz seed",
+    "evaluated_at_source": "none"
+  },
+  "log": [],
+  "signatures": {
+    "owner_sig": "Z2FyYmFnZS1ub3QtYS1yZWFsLXNpZ25hdHVyZQ==",
+    "agent_sig": "Z2FyYmFnZS1ub3QtYS1yZWFsLXNpZ25hdHVyZQ==",
+    "voucher_sig": "Z2FyYmFnZS1ub3QtYS1yZWFsLXNpZ25hdHVyZQ=="
+  }
+}
