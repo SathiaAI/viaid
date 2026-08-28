@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 // VIA ID — thin runnable prototype CLI.
-// S2 (dev): init · log · eval · verify        S1 (org): scan · gate · revoke
+// S2 (dev): init · log · eval · verify · report        S1 (org): scan · gate · revoke
 // `demo` runs the whole two-sided flow end-to-end against the REAL GraphSmith + KnoSky.
 //
 // NOT throwaway: the badge layer (src/agentid.mjs) is production-path; GraphSmith and
 // KnoSky are reached through adapter seams (src/adapters/*) that point at the installed
 // packages in production and at the cloned repos here (GRAPHSMITH_HOME / KNOSKY_HOME).
 
-import { mkdirSync, writeFileSync, rmSync, existsSync } from 'node:fs';
+import { mkdirSync, writeFileSync, rmSync, existsSync, readdirSync, openSync, fstatSync, readFileSync, closeSync, constants as fsConstants } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as aid from '../src/agentid.mjs';
@@ -65,6 +65,66 @@ const cmds = {
     log(`Scope:    ${v.scope_note}`);
     for (const s of v.steps) log(`  [${s.status}] ${s.step}${s.detail ? ' — ' + s.detail : ''}`);
     return v;
+  },
+  // Local-only badge count for whoever operates this workRoot (a solo dev, or a company
+  // running VIA ID for its own internal fleet) — no network call, no data leaves this
+  // directory. Walks *.badge.json files already sitting here and tallies them; does not
+  // change verify/mint/revoke behavior or touch anything outside `dir`.
+  //
+  // "active" reflects each badge's own stored `revocation_state` (REVOKED vs. not) — it is
+  // NOT a live freshness/signature check. A badge whose TTL has lapsed (STALE) or whose
+  // signature no longer verifies (INVALID) still counts as active here; run `verify <id>`
+  // for the real per-badge verdict. Deliberate: report is a fast, read-only sweep across a
+  // whole directory, not a per-badge verification pass.
+  report([dir = ROOT]) {
+    if (!existsSync(dir)) throw new Error(`no such directory: ${dir}`);
+    // O_NOFOLLOW/O_NONBLOCK are POSIX flags; Node leaves them undefined on platforms that
+    // don't support them (Windows). Left unchecked, `fsConstants.O_NOFOLLOW | ...` below
+    // would silently coerce a missing flag to 0 — the open would quietly stop refusing
+    // symlinks instead of erroring, so the scan would *look* protected while it isn't.
+    // Fail closed here, once, up front: refuse to scan rather than run with that guard
+    // silently missing.
+    if (!Number.isInteger(fsConstants.O_NOFOLLOW) || !Number.isInteger(fsConstants.O_NONBLOCK)) {
+      throw new Error(`report needs O_NOFOLLOW/O_NONBLOCK support to safely open badge files, which ${process.platform} doesn't provide — refusing to scan rather than silently lose the symlink guard`);
+    }
+    const files = readdirSync(dir).filter((f) => f.endsWith('.badge.json'));
+    const counts = { total: 0, skipped: 0, active: 0, revoked: 0, byTier: {} };
+    for (const f of files) {
+      const full = join(dir, f);
+      let badge;
+      let fd;
+      try {
+        // Open once with O_NOFOLLOW + O_NONBLOCK and work from that single descriptor,
+        // rather than checking the path (lstat) and then reading the path again — two
+        // separate pathname lookups leave a window where the entry could be swapped for
+        // a symlink in between the check and the read. O_NOFOLLOW makes the open itself
+        // fail (ELOOP) on a symlink; O_NONBLOCK keeps it from blocking if a special file
+        // like a named pipe sits here instead. fstat on the resulting descriptor is immune
+        // to any further swap at the path, since it's already bound to the exact file we
+        // opened, not to whatever the path currently resolves to.
+        fd = openSync(full, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW | fsConstants.O_NONBLOCK);
+        if (!fstatSync(fd).isFile()) throw new Error('not a regular file (symlink or special file)');
+        badge = JSON.parse(readFileSync(fd, 'utf8'));
+        if (badge === null || typeof badge !== 'object' || Array.isArray(badge)) {
+          throw new Error('badge JSON must be an object');
+        }
+        counts.total++;
+        const tier = badge.assurance_tier || 'unknown';
+        counts.byTier[tier] = (counts.byTier[tier] || 0) + 1;
+        if (badge.revocation_state === 'REVOKED') counts.revoked++;
+        else counts.active++;
+      } catch (e) {
+        const reason = e.code === 'ELOOP' ? 'not a regular file (symlink or special file)' : e.message;
+        log(`⚠ skipping ${f}: ${reason}`);
+        counts.skipped++;
+        continue;
+      } finally {
+        if (fd !== undefined) closeSync(fd);
+      }
+    }
+    log(`Badges in ${dir}: ${counts.total}  (active ${counts.active}, revoked ${counts.revoked}, ${counts.skipped} file(s) skipped)`);
+    for (const [tier, n] of Object.entries(counts.byTier)) log(`  ${tier}: ${n}`);
+    return counts;
   },
   // ---------- S1: org runs the desk on an inbound agent ----------
   scan([id]) {
@@ -138,7 +198,7 @@ const cmds = {
 const [cmd, ...args] = process.argv.slice(2);
 const fn = cmds[cmd];
 if (!fn) {
-  log('viaid — thin prototype\n  S2: init <name> · log <id> <action> · rotate <id> [reason|compromise] [suspected_since] · eval <id> <dir> · verify <id>\n  S1: scan <id> · gate <id> [dest] · (revoke via demo)\n  demo  — full two-sided flow');
+  log('viaid — thin prototype\n  S2: init <name> · log <id> <action> · rotate <id> [reason|compromise] [suspected_since] · eval <id> <dir> · verify <id> · report [dir]\n  S1: scan <id> · gate <id> [dest] · (revoke via demo)\n  demo  — full two-sided flow');
   process.exit(cmd ? 1 : 0);
 }
 try { await fn(args); }
