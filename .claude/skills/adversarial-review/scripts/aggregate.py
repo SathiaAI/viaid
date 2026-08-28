@@ -276,16 +276,27 @@ def main():
     counts = {"gates": 0, "reviewers": 0, "findings_high_critical": 0,
               "findings_medium_low": 0, "confirmed": 0, "unresolved": 0}
 
-    gates = check_gates(run, meta["risk"], fail, blocked, notes)
-    counts["gates"] = len(gates)
+    # Reject unknown risk tiers outright. Without this, an unrecognized meta["risk"]
+    # (missing, corrupted, or hand-edited run.json) would flow silently into
+    # TIER_ROLES.get(meta["risk"], []) in check_panel -- an empty required-role list
+    # makes panel completeness trivially satisfied -- and into check_rebuttal's
+    # REBUTTAL_SCOPE lookup the same way, skipping the rebuttal requirement too. Both
+    # would fail open (undersized panel -> PASS) instead of BLOCKED. Checked once,
+    # here, against the same TIER_ROLES the rest of the file treats as ground truth.
+    if meta.get("risk") not in TIER_ROLES:
+        blocked.append(f"unknown risk tier in run.json: {meta.get('risk')!r} "
+                        f"(expected one of {sorted(TIER_ROLES)})")
+    else:
+        gates = check_gates(run, meta["risk"], fail, blocked, notes)
+        counts["gates"] = len(gates)
 
-    plan_path = run / "panel" / "plan.json"
-    plan = read_json(plan_path) if plan_path.exists() else {}
-    reports = load_reports(run, plan)
-    counts["reviewers"] = len(reports)
-    check_panel(run, meta, plan, reports, blocked, notes)
-    check_rebuttal(run, meta, plan, reports, blocked, notes)
-    check_findings(run, meta, plan, reports, fail, blocked, counts)
+        plan_path = run / "panel" / "plan.json"
+        plan = read_json(plan_path) if plan_path.exists() else {}
+        reports = load_reports(run, plan)
+        counts["reviewers"] = len(reports)
+        check_panel(run, meta, plan, reports, blocked, notes)
+        check_rebuttal(run, meta, plan, reports, blocked, notes)
+        check_findings(run, meta, plan, reports, fail, blocked, counts)
 
     verdict = "FAIL" if fail else ("BLOCKED" if blocked else "PASS")
     out = {"verdict": verdict, "reasons": fail + blocked, "notes": notes,

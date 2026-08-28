@@ -69,6 +69,17 @@ name: Adversarial Review Gate
 #      the fork's own (untrusted) code, which is the root cause behind most public
 #      writeups of GitHub Actions secret-exfiltration incidents. viaid doesn't
 #      currently expect outside contributors; revisit if that changes.
+#
+#   5. RESOLVED 2026-08-28 (CodeRabbit finding on this PR, Major/Security): the
+#      enforcement step's original `.adversarial-review/run-*/verdict.json` glob
+#      searched a path inside the checked-out working tree. A PR can commit a decoy
+#      file at that exact shape (`.adversarial-review/run-<fake>/verdict.json`,
+#      `{"verdict":"PASS"}`); since the enforcement step's `if:` has no
+#      success()/always() guard, it still runs even if the review step above fails
+#      or writes nothing, so the decoy alone would satisfy the "exactly one match"
+#      check. Fixed by moving AR_RUN_DIR (already supported by _common.py) to a
+#      $RUNNER_TEMP path outside the checkout, which the PR's own content can never
+#      populate. See job env and the enforcement step below.
 
 on:
   pull_request:
@@ -125,6 +136,11 @@ jobs:
       id-token: write
     env:
       OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      # Job-owned run directory, outside the checked-out working tree. The skill's
+      # scripts (_common.py: RUN_ROOT = Path(os.environ.get("AR_RUN_DIR", ...)))
+      # already support this override -- see the enforcement step below for why it's
+      # required, not optional.
+      AR_RUN_DIR: ${{ runner.temp }}/adversarial-review
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -187,14 +203,19 @@ jobs:
       - name: Enforce verdict for CRITICAL tier
         if: needs.classify.outputs.tier == 'CRITICAL'
         run: |
-          # Only trust a verdict.json under a real run directory (.adversarial-review/run-*/),
-          # and require there be exactly one. .adversarial-review/ is normally gitignored, but
-          # a malicious contributor can `git add -f` a decoy file into it (e.g.
-          # .adversarial-review/zz/verdict.json with {"verdict":"PASS"}), and plain
-          # `sort | tail -1` glob would pick "zz" over "run-..." since z > r lexicographically.
+          # Only trust a verdict.json under a real run directory ($AR_RUN_DIR/run-*/),
+          # and require there be exactly one. $AR_RUN_DIR is set (see job env above) to a
+          # path under $RUNNER_TEMP -- outside the checked-out working tree -- specifically
+          # so a malicious contributor cannot `git add -f` a fake run-*/verdict.json (e.g.
+          # {"verdict":"PASS"}) into the PR and have it picked up here. Matching on a
+          # run-*-shaped name inside the checkout alone was not sufficient: this step's own
+          # `if:` has no success()/always() guard, so it still runs even when the review
+          # step above fails or writes nothing -- a committed decoy would then be the only
+          # file present and would satisfy an "exactly one match" check on its own. Keeping
+          # the run directory itself out of the checkout closes that regardless of naming.
           # Zero or multiple matches BLOCK instead of guessing.
-          mapfile -t VERDICT_FILES < <(find .adversarial-review -mindepth 2 -maxdepth 2 \
-            -path '.adversarial-review/run-*/verdict.json' 2>/dev/null | sort)
+          mapfile -t VERDICT_FILES < <(find "$AR_RUN_DIR" -mindepth 2 -maxdepth 2 \
+            -path "$AR_RUN_DIR/run-*/verdict.json" 2>/dev/null | sort)
           if [ "${#VERDICT_FILES[@]}" -eq 0 ]; then
             echo "No verdict.json produced under a run-* directory -- treating as BLOCKED, not silently passing."
             exit 1
