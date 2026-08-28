@@ -8,7 +8,13 @@
 //   kill      -> createSwarmCoordinator().revokeLease  (revoke; the gate then refuses)
 //
 // Seam: in production this points at the installed `knosky` npm package.
-// In this sandbox it points at the cloned repo via KNOSKY_HOME (default /tmp/ks-src).
+// In this sandbox it points at the cloned repo via KNOSKY_HOME (must be set explicitly).
+//
+// SAT-960: KNOSKY_HOME used to default to a fixed, predictable path (/tmp/ks-src) when unset.
+// On a shared/multi-tenant host that path is world-writable and guessable, so anyone could
+// pre-place a fake `core/` module tree there and have it silently imported/spawned as if it
+// were the real KnoSky. Fixed: no fallback — the env var must be set explicitly, or every call
+// fails loudly instead of trusting a guessable shared path.
 //
 // HONEST LIMITS (must not overclaim): kill = revoke + gate-refuse (NEVER remote-terminate);
 // lease-revoke here uses holder self-revoke for the demo — production S1 "org kills visitor"
@@ -19,16 +25,29 @@ import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { existsSync } from 'node:fs';
 
-const KS_HOME = process.env.KNOSKY_HOME || '/tmp/ks-src';
-const core = (m) => import(pathToFileURL(join(KS_HOME, 'core', m)).href);
+function resolveHome() {
+  const home = process.env.KNOSKY_HOME;
+  if (!home) {
+    throw new Error(
+      'KNOSKY_HOME is not set. A shared default path (e.g. /tmp/ks-src) is predictable and ' +
+      'writable by other users on a multi-tenant host, so no fallback is used — set KNOSKY_HOME ' +
+      'to your KnoSky checkout explicitly.'
+    );
+  }
+  return home;
+}
+const core = (m) => import(pathToFileURL(join(resolveHome(), 'core', m)).href);
 
 export function knoskyAvailable() {
-  return existsSync(join(KS_HOME, 'core', 'mode-b.mjs')) && existsSync(join(KS_HOME, 'node_modules'));
+  const home = process.env.KNOSKY_HOME;
+  if (!home) return false;
+  return existsSync(join(home, 'core', 'mode-b.mjs')) && existsSync(join(home, 'node_modules'));
 }
 
 // Build a real KnoSky "city" index from a sample dir (the genuine indexer flow).
 export function buildCity(sampleDir, cityOut) {
-  const indexer = join(KS_HOME, 'core', 'fs-indexer.mjs');
+  const home = resolveHome();
+  const indexer = join(home, 'core', 'fs-indexer.mjs');
   const r = spawnSync('node', [indexer, '--root', sampleDir, '--out', cityOut, '--share-safe'],
     { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
   if (!existsSync(cityOut)) throw new Error(`KnoSky indexer failed: ${r.stderr?.slice(0, 300)}`);

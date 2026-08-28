@@ -17,7 +17,18 @@ import { renderVerifyPage } from '../src/verify-page.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = process.env.VIAID_WORK || join(HERE, '..', 'viaid-work');
-const badgePath = (id) => join(ROOT, id + '.badge.json');
+// SAT-959: `id` reaches badgePath() from raw CLI argv on every command below. Without
+// validation an id like `../../../../etc/cron.d/x` or an absolute path walks the resulting
+// join() outside ROOT entirely. Reuse agentid.mjs's own AGENT_ID_RE check (the same shape a
+// legitimately-minted agent_id always has) so every command rejects a malformed/malicious id
+// before it ever becomes part of a filesystem path, instead of each command re-implementing
+// its own check (or forgetting to).
+const badgePath = (id) => {
+  if (!aid.isValidAgentId(id)) {
+    throw new Error(`invalid agent id (expected via_<32 lowercase hex>, got ${JSON.stringify(id)}) — refusing to build a path from it`);
+  }
+  return join(ROOT, id + '.badge.json');
+};
 const log = (...a) => console.log(...a);
 const hr = () => log('─'.repeat(64));
 
