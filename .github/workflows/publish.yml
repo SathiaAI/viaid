@@ -1,0 +1,58 @@
+name: Publish
+
+# SAT-1010: publish to npm via Trusted Publishing (OIDC) -- no long-lived NPM_TOKEN secret.
+# GitHub mints a short-lived OIDC id-token for this job, which the npm CLI (>= 11.5.1)
+# automatically exchanges for a short-lived, workflow-specific publish token. Source: npm's
+# Trusted Publishing docs, https://docs.npmjs.com/trusted-publishers/ (fetched 2026-08-28) --
+# see the PR description for the exact quotes/workflow shape this file is built from.
+#
+# This file alone does not make publishing work: npm only accepts a trusted-publisher exchange
+# for a repo/workflow it has been explicitly told to trust. That trust relationship is an
+# npmjs.com *account* setting on the `viaid-skill` package (Settings -> Trusted Publisher),
+# which only the package's npm-account owner can configure -- see the PR description for the
+# exact, numbered steps. This workflow does nothing until that's done, and this change does not
+# (and cannot, from a repo checkout) configure it.
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  id-token: write # lets GitHub mint the OIDC token npm exchanges for a short-lived publish token
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false # never cache in a release build (npm's own recommendation)
+
+      # Trusted Publishing requires npm CLI >= 11.5.1 (docs.npmjs.com/trusted-publishers/).
+      # Node 24's bundled npm clears that bar today, but pin the floor explicitly here rather
+      # than depend on whatever happens to ship with the runner's Node install at publish time --
+      # a real-world report of this exact gap is cited in the PR description.
+      - run: npm install -g npm@latest
+
+      - run: npm ci
+
+      - run: npm run build --if-present
+
+      # This repo's tests run via plain `node --test` (see .github/workflows/ci.yml) -- there is
+      # no `npm test` script defined, so this calls the same command ci.yml's test job does
+      # rather than npm's generic example's `npm test`.
+      - run: node --test
+
+      # --provenance is redundant with npm's documented default (provenance is generated
+      # automatically for a public package published from a public repo via Trusted Publishing)
+      # but is passed explicitly anyway: a real-world report (cited in the PR description) found
+      # the "automatic" behavior didn't always trigger in practice. Harmless either way.
+      - run: npm publish --provenance
