@@ -4,3 +4,9 @@ viaid-work/
 *.log
 .DS_Store
 .adversarial-review/
+
+# SAT-1009: Jazzer.js writes newly-discovered "interesting" inputs into the first corpus
+# directory it's given at runtime. That scratch directory is kept separate from the small,
+# curated, hand-authored seed files under fuzz/corpus/ (which stay read-only and tracked)
+# — see the fuzz:verify-badge script in package.json.
+.jazzer-corpus/

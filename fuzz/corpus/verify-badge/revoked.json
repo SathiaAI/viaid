@@ -1,0 +1,35 @@
+{
+  "schema": "viaid.badge/0.1",
+  "agent_id": "via_1d1f8900847d37cff38d305f44f6a535",
+  "inception": {
+    "schema": "viaid.badge/0.1",
+    "name": "fuzz-seed-revoked",
+    "owner_id": "local-dev",
+    "owner_pub": "MCowBQYDK2VwAyEAgjCMOS837LxXbdOIvpje92THcAryuNMnFkx8MdpSHrk=",
+    "agent_pub": "MCowBQYDK2VwAyEAMBCZ9RjME9Grcld1pqyrsCZTaHnWOqLfSWKCbcRch40=",
+    "voucher_pub": "MCowBQYDK2VwAyEAkmDZUiuEUvccLz/n0+t/Kgvsj8a4hSnjweVkXHmsQl4=",
+    "next_key_commitment": "bff9d1cdb75679dec20e9a8fd00d25229c3af97b427a970e5d8e12f40142c414",
+    "key_seq": 0,
+    "issued_at": "2026-08-28T00:00:00.000Z",
+    "badge_ttl": 7776000
+  },
+  "keys": {
+    "owner_pub": "MCowBQYDK2VwAyEAgjCMOS837LxXbdOIvpje92THcAryuNMnFkx8MdpSHrk=",
+    "agent_pub": "MCowBQYDK2VwAyEAMBCZ9RjME9Grcld1pqyrsCZTaHnWOqLfSWKCbcRch40=",
+    "voucher_pub": "MCowBQYDK2VwAyEAkmDZUiuEUvccLz/n0+t/Kgvsj8a4hSnjweVkXHmsQl4="
+  },
+  "key_seq": 0,
+  "next_key_commitment": "bff9d1cdb75679dec20e9a8fd00d25229c3af97b427a970e5d8e12f40142c414",
+  "last_rotation_reason": null,
+  "last_rotation_at": null,
+  "assurance_tier": "SELF",
+  "revocation_state": "REVOKED",
+  "revoked_reason": "fuzz seed -- deliberately revoked",
+  "evidence": null,
+  "log": [],
+  "signatures": {
+    "owner_sig": "geYNZ26Zg48W33hHq2nfnRfpUGqFT0SiKLU3Kl4MpTLelDpdyAHkZPaoE27vXNgkS3t81e6JwOD/MFf85JXDCg==",
+    "agent_sig": "X1h2vlaluCVgARn9VdfvXlo+oBPF+1WkOD7hw2S/pjcYBeyB1BsDMgyFpaLzzgZ+a+Kujk+oLlut5YmSRbQQBA==",
+    "voucher_sig": "Ms+uwQAyr70fjjc+AW3//33ZKyJ7vfmJbhHma57rxZ3MVLc+/0bD7vh9KwDPfW7eHsShciBxjPn53Sg8RRZiDA=="
+  }
+}

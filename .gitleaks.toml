@@ -1,0 +1,22 @@
+title = "viaid gitleaks config"
+
+# Extend (not replace) gitleaks' default ruleset -- this file only adds a scoped
+# allowlist, it must not silently narrow real secret detection anywhere else.
+[extend]
+useDefault = true
+
+[allowlist]
+description = '''
+SAT-1009 fuzz seed fixtures (fuzz/corpus/verify-badge/*.json) trip the default
+generic-api-key rule on `next_key_commitment` / `new_next_key_commitment` values.
+Those are SHA-256 hashes of a not-yet-revealed public key in this project's
+KERI-style pre-rotation scheme (see rotateKey() in src/agentid.mjs) -- meant to
+be disclosed publicly ahead of time, not secrets. The `*_pub` / `*_sig` /
+`voucher_attestation` fields in the same files are literal placeholder strings
+(base64 of "garbage-not-a-real-...") used only to make each fuzz seed a
+structurally well-formed badge; never real key material. Scoped to that one
+fixtures directory rather than disabled repo-wide.
+'''
+paths = [
+  '''^fuzz/corpus/verify-badge/.*\.json$''',
+]

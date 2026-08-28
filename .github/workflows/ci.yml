@@ -26,6 +26,23 @@ jobs:
           node-version: '24'
       - run: node --test
 
+  # SAT-1009: short, time-boxed fuzz smoke-test of the badge verify/parse core
+  # (src/agentid.mjs's verifyBadge()) -- malformed/adversarial badge JSON must fail
+  # cleanly (INVALID verdict), never crash the process or return a false VALID. Bounded
+  # via -max_total_time in the fuzz:verify-badge script (package.json), so this can
+  # never hang CI indefinitely -- see that script for the exact duration/iteration cap.
+  fuzz-badge-verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+      - run: npm ci
+      - run: npm run fuzz:verify-badge
+
   secrets-scan:
     runs-on: ubuntu-latest
     permissions:
