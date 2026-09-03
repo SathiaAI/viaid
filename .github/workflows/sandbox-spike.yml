@@ -1,0 +1,71 @@
+name: Sandbox Spike (bubblewrap / AppArmor probe)
+
+# One-off diagnostic for option-b-implementation-plan.md §5.5: does a bubblewrap-based
+# sandbox (the backend behind Claude Code's sandbox.enabled:true) actually work on a real
+# GitHub-hosted ubuntu-latest runner, given Ubuntu 24.04+'s AppArmor restriction on
+# unprivileged user namespace creation? A local cloud-sandbox test (2026-09-03) confirmed
+# bubblewrap works mechanically -- unprivileged userns, filesystem isolation, and network
+# isolation all functioned -- but that sandbox runs with NO AppArmor enforcement at all
+# (no kernel module, no aa-status, none of the relevant sysctls), so it couldn't exercise
+# the actual restriction. This workflow runs the identical checks on a real runner to get
+# a real answer.
+#
+# Standalone and disposable: touches no other workflow, needs no repo secrets, safe to
+# delete once the question is answered. Triggers on push to this exact branch so pushing
+# it is enough to see a result; workflow_dispatch is here too for re-runs.
+
+on:
+  push:
+    branches: [ci/sandbox-bubblewrap-spike]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Identify the runner
+        run: |
+          echo "--- whoami / id ---"
+          whoami
+          id
+          echo "--- os-release ---"
+          cat /etc/os-release
+          echo "--- kernel ---"
+          uname -a
+
+      - name: AppArmor status
+        run: |
+          echo "--- apparmor kernel param ---"
+          cat /sys/module/apparmor/parameters/enabled 2>&1 || echo "(no apparmor parameters file)"
+          echo "--- aa-status ---"
+          (command -v aa-status >/dev/null && sudo aa-status) 2>&1 || echo "(aa-status unavailable)"
+          echo "--- relevant sysctls ---"
+          sysctl kernel.apparmor_restrict_unprivileged_userns 2>&1 || echo "(sysctl not present)"
+          sysctl kernel.unprivileged_userns_clone 2>&1 || echo "(sysctl not present)"
+
+      - name: Install bubblewrap + socat
+        run: sudo apt-get update -qq && sudo apt-get install -y bubblewrap socat
+
+      - name: Unprivileged user namespace + bubblewrap test
+        run: |
+          set -x
+          bwrap --version
+          echo "--- unshare --user (bare syscall path) ---"
+          unshare --user --pid --map-root-user echo "unprivileged userns: OK" \
+            || echo "unprivileged userns: FAILED (this is the AppArmor restriction the plan flagged)"
+          echo "--- bwrap with filesystem isolation ---"
+          bwrap --ro-bind / / --proc /proc --dev /dev --unshare-all --die-with-parent \
+            -- /bin/echo "bwrap filesystem isolation: OK" \
+            || echo "bwrap filesystem isolation: FAILED"
+          echo "--- bwrap network isolation check (expect BLOCKED -- that's success) ---"
+          bwrap --ro-bind / / --proc /proc --dev /dev --unshare-all --die-with-parent \
+            -- /bin/sh -c 'wget -q -T 3 -O- https://example.com >/dev/null 2>&1 && echo NETWORK_REACHABLE_BUG || echo NETWORK_BLOCKED_AS_EXPECTED'
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "If 'unprivileged userns' and 'bwrap filesystem isolation' both say OK above, and network shows BLOCKED_AS_EXPECTED, the AppArmor restriction is not a blocker on this runner image -- Claude Code's sandbox.enabled:true is safe to rely on as documented in plan §5.5."
+          echo "If either says FAILED, that is the AppArmor wrinkle the plan warned about, and Phase 3 will need the documented workaround (or an alternative) before it can depend on the sandbox."
