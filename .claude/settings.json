@@ -1,0 +1,41 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git blame:*)",
+      "Bash(git ls-files:*)",
+      "Bash(git grep:*)",
+      "Bash(git rev-parse:*)",
+      "Bash(gh api repos/SathiaAI/viaid/branches/main/protection)",
+      "Bash(gh api repos/SathiaAI/viaid/commits/*/check-runs:*)",
+      "Bash(gh api repos/SathiaAI/viaid/commits/*/status:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr diff:*)",
+      "Bash(python3 .claude/skills/adversarial-review/scripts/panel.py init:*)",
+      "Bash(python3 .claude/skills/adversarial-review/scripts/panel.py assign:*)",
+      "Bash(python3 .claude/skills/adversarial-review/scripts/panel.py prepare:*)",
+      "Bash(python3 .claude/skills/adversarial-review/scripts/panel.py ingest:*)",
+      "Bash(python3 .claude/skills/adversarial-review/scripts/panel.py rebuttal:*)",
+      "Bash(python3 .claude/skills/adversarial-review/scripts/panel.py concur:*)",
+      "Bash(python3 .claude/skills/adversarial-review/scripts/gate.py plan:*)",
+      "Bash(python3 .claude/skills/adversarial-review/scripts/gate.py record:*)",
+      "Bash(python3 .claude/skills/adversarial-review/scripts/aggregate.py)",
+      "Bash(npm ci)",
+      "Bash(npm install)"
+    ],
+    "deny": [
+      "Bash(python3 .claude/skills/adversarial-review/scripts/gate.py run:*)",
+      "Bash(git push:*)",
+      "Bash(git remote:*)",
+      "Bash(gh pr merge:*)",
+      "Bash(gh pr edit:*)",
+      "Bash(gh release:*)",
+      "Bash(npm publish:*)",
+      "Bash(curl:*)",
+      "Bash(wget:*)",
+      "Bash(rm -rf:*)"
+    ]
+  }
+}
