@@ -1,5 +1,6 @@
 {
   "permissions": {
+    "defaultMode": "dontAsk",
     "allow": [
       "Bash(git diff:*)",
       "Bash(git log:*)",
@@ -19,16 +20,27 @@
       "Bash(python3 .claude/skills/adversarial-review/scripts/panel.py ingest:*)",
       "Bash(python3 .claude/skills/adversarial-review/scripts/panel.py rebuttal:*)",
       "Bash(python3 .claude/skills/adversarial-review/scripts/panel.py concur:*)",
+      "Bash(python3 .claude/skills/adversarial-review/scripts/panel.py run:*)",
       "Bash(python3 .claude/skills/adversarial-review/scripts/gate.py plan:*)",
       "Bash(python3 .claude/skills/adversarial-review/scripts/gate.py record:*)",
       "Bash(python3 .claude/skills/adversarial-review/scripts/aggregate.py)",
-      "Bash(npm ci)",
-      "Bash(npm install)"
+      "Bash(npm ci --ignore-scripts)",
+      "Bash(npm install --ignore-scripts)"
     ],
     "deny": [
       "Bash(python3 .claude/skills/adversarial-review/scripts/gate.py run:*)",
       "Bash(git push:*)",
       "Bash(git remote:*)",
+      "Bash(git -c*)",
+      "Bash(* --ext-diff*)",
+      "Bash(* --output=*)",
+      "Bash(* -O*)",
+      "Bash(* --open-files-in-pager*)",
+      "Bash(* --method*)",
+      "Bash(* --input*)",
+      "Bash(* --hostname*)",
+      "Bash(* --header*)",
+      "Bash(* --field*)",
       "Bash(gh pr merge:*)",
       "Bash(gh pr edit:*)",
       "Bash(gh release:*)",
