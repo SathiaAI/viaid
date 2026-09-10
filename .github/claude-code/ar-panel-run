@@ -1,0 +1,55 @@
+#!/usr/bin/env bash
+# Closed-arg wrapper for panel.py run (GitHub #20 P1 / SAT-1014).
+# Accepts no arguments and forwards none. Context must already exist under $AR_RUN_DIR.
+set -euo pipefail
+
+if [[ $# -ne 0 ]]; then
+  echo "ERROR: ar-panel-run is a closed wrapper and accepts no arguments." >&2
+  echo "Write context.md under \$AR_RUN_DIR, then run this command with no flags." >&2
+  exit 2
+fi
+
+if [[ -z "${AR_RUN_DIR:-}" ]]; then
+  echo "ERROR: AR_RUN_DIR is unset; refusing to run." >&2
+  exit 2
+fi
+
+if [[ "${AR_RUN_DIR}" != /* ]] || [[ ! -d "${AR_RUN_DIR}" ]]; then
+  echo "ERROR: AR_RUN_DIR must be an existing absolute directory (got ${AR_RUN_DIR})" >&2
+  exit 2
+fi
+
+CONTEXT=""
+if [[ -f "${AR_RUN_DIR}/context.md" ]]; then
+  CONTEXT="${AR_RUN_DIR}/context.md"
+else
+  shopt -s nullglob
+  matches=("${AR_RUN_DIR}"/run-*/context.md)
+  shopt -u nullglob
+  if [[ ${#matches[@]} -eq 0 ]]; then
+    echo "ERROR: no context.md under ${AR_RUN_DIR} (expected \$AR_RUN_DIR/context.md or \$AR_RUN_DIR/run-*/context.md)" >&2
+    exit 2
+  fi
+  CONTEXT="${matches[-1]}"
+fi
+
+ROOT_REAL=$(readlink -f "${AR_RUN_DIR}")
+CTX_REAL=$(readlink -f "${CONTEXT}")
+case "${CTX_REAL}" in
+  "${ROOT_REAL}"/*) ;;
+  *)
+    echo "ERROR: context file resolves outside AR_RUN_DIR (${CTX_REAL})" >&2
+    exit 2
+    ;;
+esac
+
+PANEL="${GITHUB_WORKSPACE:-.}/.claude/skills/adversarial-review/scripts/panel.py"
+if [[ ! -f "${PANEL}" ]]; then
+  PANEL=".claude/skills/adversarial-review/scripts/panel.py"
+fi
+if [[ ! -f "${PANEL}" ]]; then
+  echo "ERROR: panel.py not found at ${PANEL}" >&2
+  exit 2
+fi
+
+exec python3 "${PANEL}" run --context-file "${CTX_REAL}"

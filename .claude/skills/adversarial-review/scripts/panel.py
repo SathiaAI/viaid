@@ -27,8 +27,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import (RUN_ROOT, die, family_of, now_iso, read_json, resolve_run,
-                     write_json)
+from _common import (RUN_ROOT, die, family_of, now_iso, read_json,
+                     require_under_run_root, resolve_run, write_json)
 
 DEFAULT_BASE = "https://openrouter.ai/api/v1"
 
@@ -653,6 +653,10 @@ def cmd_rebuttal(args):
 
 
 def cmd_concur(args):
+    # Issue #20 P1: --prompt-file is shipped to an external model. Constrain it
+    # to AR_RUN_DIR before any catalog/network work so injection cannot point
+    # this at /proc/self/environ or another escape path.
+    prompt_path = require_under_run_root(args.prompt_file, "--prompt-file")
     run = resolve_run(args.run)
     meta = read_json(run / "run.json")
     plan = read_json(run / "panel" / "plan.json")
@@ -667,7 +671,7 @@ def cmd_concur(args):
     if not fam:
         die("no eligible uninvolved family for concurrence", 2)
     model = pick_model(by_family[fam])
-    prompt = Path(args.prompt_file).read_text(encoding="utf-8")
+    prompt = prompt_path.read_text(encoding="utf-8")
     system = ("You are an uninvolved arbiter on a release panel. A conflicted party "
               "(the development model) wants to dismiss a reviewer finding as a false "
               "positive. Judge ONLY on the evidence presented. If the evidence does "

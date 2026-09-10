@@ -44,6 +44,31 @@ def die(msg, code=1):
     sys.exit(code)
 
 
+def require_under_run_root(path_arg, flag_name):
+    """Refuse paths that are not real files inside AR_RUN_DIR / RUN_ROOT.
+
+    Symlink escapes are resolved first, then the real path must stay under the
+    run root. Missing or unreadable files fail closed.
+    """
+    if not path_arg:
+        die(f"{flag_name} is required")
+    try:
+        root = RUN_ROOT.expanduser().resolve()
+    except OSError as exc:
+        die(f"cannot resolve AR_RUN_DIR ({RUN_ROOT}): {exc}")
+    try:
+        resolved = Path(path_arg).expanduser().resolve()
+    except (OSError, RuntimeError) as exc:
+        die(f"{flag_name}: cannot resolve {path_arg!r}: {exc}")
+    try:
+        resolved.relative_to(root)
+    except ValueError:
+        die(f"{flag_name} must be under AR_RUN_DIR ({root}); refused {path_arg!r}")
+    if not resolved.is_file():
+        die(f"{flag_name} is not a readable file under AR_RUN_DIR: {resolved}")
+    return resolved
+
+
 # Provider-family normalization. Family = the model AUTHOR's organization — the unit of
 # independence. Slug prefixes vary across routers; map known variants to one family key.
 FAMILY_ALIASES = {
