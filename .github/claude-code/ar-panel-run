@@ -42,6 +42,17 @@ case "${CTX_REAL}" in
     exit 2
     ;;
 esac
+# Best-effort no-follow: refuse a symlink at the named path (even if the
+# target is inside AR_RUN_DIR). panel.py run re-opens under AR_RUN_DIR with
+# O_NOFOLLOW, so a TOCTOU swap after this check fails closed there.
+if [[ -L "${CONTEXT}" ]] || [[ -L "${CTX_REAL}" ]]; then
+  echo "ERROR: context file is a symlink; refused (no-follow under AR_RUN_DIR)" >&2
+  exit 2
+fi
+if [[ ! -f "${CTX_REAL}" ]]; then
+  echo "ERROR: context file is not a regular file under AR_RUN_DIR (${CTX_REAL})" >&2
+  exit 2
+fi
 
 PANEL="${GITHUB_WORKSPACE:-.}/.claude/skills/adversarial-review/scripts/panel.py"
 if [[ ! -f "${PANEL}" ]]; then

@@ -351,6 +351,14 @@ jobs:
               exit 2
               ;;
           esac
+          if [[ -L "${CONTEXT}" ]] || [[ -L "${CTX_REAL}" ]]; then
+            echo "ERROR: context file is a symlink; refused (no-follow under AR_RUN_DIR)" >&2
+            exit 2
+          fi
+          if [[ ! -f "${CTX_REAL}" ]]; then
+            echo "ERROR: context file is not a regular file under AR_RUN_DIR (${CTX_REAL})" >&2
+            exit 2
+          fi
           PANEL="${GITHUB_WORKSPACE:-.}/.claude/skills/adversarial-review/scripts/panel.py"
           if [[ ! -f "${PANEL}" ]]; then
             PANEL=".claude/skills/adversarial-review/scripts/panel.py"
@@ -381,12 +389,44 @@ jobs:
             python3 "$PIN_CHECKER" "$DEST"
           else
             python3 - "$DEST" <<'PY'
-          import json, stat, sys
+          import json, re, stat, sys
           from pathlib import Path
           path = Path(sys.argv[1])
+          WRAPPER = "Bash(/usr/local/bin/ar-panel-run)"
+          PANEL_RUN_DENY = (
+              "Bash(python .claude/skills/adversarial-review/scripts/panel.py run:*)",
+              "Bash(python3 .claude/skills/adversarial-review/scripts/panel.py run:*)",
+          )
+          PANEL_RUN_CMDS = (
+              "python .claude/skills/adversarial-review/scripts/panel.py run",
+              "python3 .claude/skills/adversarial-review/scripts/panel.py run",
+              "python .claude/skills/adversarial-review/scripts/panel.py run --context-file x",
+              "python3 .claude/skills/adversarial-review/scripts/panel.py run --context-file x",
+          )
+          PANEL_PY_SUPERSET = re.compile(r"panel\.py(?:\s*:\*|\s*$|\s*\))")
           def fail(msg):
               print(f"ERROR: managed-settings parse-or-refuse: {msg}", file=sys.stderr)
               raise SystemExit(1)
+          def bash_inner(rule):
+              if not rule.startswith("Bash(") or not rule.endswith(")"):
+                  return None
+              return rule[5:-1]
+          def bash_covers(inner, command):
+              if inner in ("*", "*:*") or inner.startswith("*:") or inner == "":
+                  return True
+              if inner.endswith(":*"):
+                  prefix = inner[:-2]
+                  if prefix in ("", "*"):
+                      return True
+                  return command == prefix or command.startswith(prefix)
+              return command == inner
+          def authorizes_panel_run(rule):
+              if "panel.py run" in rule or PANEL_PY_SUPERSET.search(rule):
+                  return True
+              inner = bash_inner(rule)
+              if inner is None:
+                  return False
+              return any(bash_covers(inner, cmd) for cmd in PANEL_RUN_CMDS)
           if not path.exists():
               fail(f"missing file: {path}")
           try:
@@ -416,16 +456,28 @@ jobs:
               fail('permissions.defaultMode must be "dontAsk"')
           if perms.get("disableBypassPermissionsMode") != "disable":
               fail('permissions.disableBypassPermissionsMode must be "disable"')
+          if perms.get("disableAutoMode") != "disable":
+              fail('permissions.disableAutoMode must be "disable"')
           allow = perms.get("allow")
           if not isinstance(allow, list):
               fail("permissions.allow must be an array")
           for rule in allow:
               if not isinstance(rule, str):
                   fail("permissions.allow entries must be strings")
-              if "panel.py run" in rule:
-                  fail("permissions.allow must not list panel.py run directly")
-          if "Bash(/usr/local/bin/ar-panel-run)" not in allow:
+              if rule == WRAPPER:
+                  continue
+              if rule == "Bash(*)" or rule.startswith("Bash(*"):
+                  fail("permissions.allow must not include Bash(*) or other unbounded Bash wildcards that re-enable panel.py run")
+              if authorizes_panel_run(rule):
+                  fail("permissions.allow must not authorize panel.py run except via exact " + WRAPPER)
+          if WRAPPER not in allow:
               fail("permissions.allow must include exact Bash(/usr/local/bin/ar-panel-run)")
+          deny = perms.get("deny")
+          if not isinstance(deny, list):
+              fail("permissions.deny must be an array")
+          for required in PANEL_RUN_DENY:
+              if required not in deny:
+                  fail(f"permissions.deny must include exact {required}")
           print(f"OK: managed-settings readable and parseable at {path}")
           PY
           fi
