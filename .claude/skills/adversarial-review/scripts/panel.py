@@ -27,8 +27,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from _common import (RUN_ROOT, die, family_of, now_iso, read_json, resolve_run,
-                     write_json)
+from _common import (RUN_ROOT, die, family_of, now_iso, read_json,
+                     read_under_run_root, resolve_run, write_json)
 
 DEFAULT_BASE = "https://openrouter.ai/api/v1"
 
@@ -486,10 +486,12 @@ def run_one_role(run, meta, plan, role, context_text, base, key):
 
 
 def cmd_run(args):
+    # Issue #20 P1: open context once under AR_RUN_DIR (no-follow) before any
+    # catalog/network work. Do not reopen args.context_file afterward.
+    context_text = read_under_run_root(args.context_file, "--context-file")
     run = resolve_run(args.run)
     meta = read_json(run / "run.json")
     plan = read_json(run / "panel" / "plan.json")
-    context_text = Path(args.context_file).read_text(encoding="utf-8")
     base, key = api_config()
     if not key:
         die("no API key found (OPENROUTER_API_KEY / AR_API_KEY / AR_KEY_FILE). "
@@ -535,10 +537,13 @@ def cmd_run(args):
 
 
 def cmd_prepare(args):
+    # Same AR_RUN_DIR containment as concur: an unrestricted --context-file
+    # would let prepare copy /proc/self/environ into run-*/panel/requests/
+    # which concur would then accept as in-tree. Read once, no-follow.
+    context_text = read_under_run_root(args.context_file, "--context-file")
     run = resolve_run(args.run)
     meta = read_json(run / "run.json")
     plan = read_json(run / "panel" / "plan.json")
-    context_text = Path(args.context_file).read_text(encoding="utf-8")
     for role, info in plan["roles"].items():
         boundary = secrets.token_hex(8)
         messages = reviewer_messages(role, meta, context_text, boundary)
@@ -653,6 +658,10 @@ def cmd_rebuttal(args):
 
 
 def cmd_concur(args):
+    # Issue #20 P1: --prompt-file is shipped to an external model. Open it
+    # once under AR_RUN_DIR (root-anchored, no-follow) and read the bytes
+    # before catalog/network work. Do not reopen the pathname afterward.
+    prompt = read_under_run_root(args.prompt_file, "--prompt-file")
     run = resolve_run(args.run)
     meta = read_json(run / "run.json")
     plan = read_json(run / "panel" / "plan.json")
@@ -667,7 +676,6 @@ def cmd_concur(args):
     if not fam:
         die("no eligible uninvolved family for concurrence", 2)
     model = pick_model(by_family[fam])
-    prompt = Path(args.prompt_file).read_text(encoding="utf-8")
     system = ("You are an uninvolved arbiter on a release panel. A conflicted party "
               "(the development model) wants to dismiss a reviewer finding as a false "
               "positive. Judge ONLY on the evidence presented. If the evidence does "
