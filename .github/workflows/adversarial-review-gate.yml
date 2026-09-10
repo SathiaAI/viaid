@@ -49,12 +49,13 @@ name: Adversarial Review Gate
 #      design treats "can't verify" as BLOCKED (correctly, not silently PASS),
 #      but that's still a false-alarm risk worth fixing before this is required.
 #
-#   3. UNTESTED: --max-turns 40 below is a guess at enough headroom for the
-#      full Step 0-6 pipeline on a real diff; not verified against an actual
-#      run since this can't be executed from this sandbox. Same caveat now
-#      applies to the vendored skill itself -- this workflow has not yet been
-#      observed actually running panel.py/aggregate.py successfully in a real
-#      GitHub Actions job.
+#   3. RAISED 2026-09-10 (Paul greenlit thin fix on #21): --max-turns 80
+#      (was 40). Live SENSITIVE/CRITICAL runs exhausted 40 turns before
+#      Steps 0-6 could finish (known P3 on SAT-1014). 80 is the board
+#      default; no prior note preferred 100. Same caveat now applies to
+#      the vendored skill itself -- this workflow has not yet been
+#      observed actually running panel.py/aggregate.py successfully in a
+#      real GitHub Actions job.
 #
 #   4. RESOLVED 2026-08-14: fork PRs. `on: pull_request` (not pull_request_target,
 #      deliberately -- see below) means GitHub withholds repo secrets, including
@@ -493,7 +494,7 @@ jobs:
           # If switching to API-key billing instead of the subscription token,
           # delete the line above and use instead:
           # anthropic_api_key: ${{ secrets.ANTHROPIC_API_KEY }}
-          claude_args: "--max-turns 40"
+          claude_args: "--max-turns 80"
           prompt: |
             Run the adversarial-review skill against this pull request end to end.
             Risk tier (already decided, do not reclassify): ${{ needs.classify.outputs.tier }}
