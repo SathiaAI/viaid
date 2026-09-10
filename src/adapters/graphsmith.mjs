@@ -24,6 +24,7 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 
+/** Return GRAPHSMITH_HOME, or throw if unset (no shared-path fallback). */
 function resolveHome() {
   const home = process.env.GRAPHSMITH_HOME;
   if (!home) {
@@ -36,13 +37,18 @@ function resolveHome() {
   return home;
 }
 
+/** True when GRAPHSMITH_HOME is set and scripts/verify.js exists there. */
 export function graphsmithAvailable() {
   const home = process.env.GRAPHSMITH_HOME;
   if (!home) return false;
   return existsSync(join(home, 'scripts', 'verify.js'));
 }
 
-// evaluate(targetDir) -> { engine, status, confirmed_profiles[], downgraded_profiles[], note, evaluated_at_source, raw }
+/**
+ * Run GraphSmith verify.js --profiles on targetDir.
+ * @param {string} targetDir
+ * @returns {{ engine: string, status: string, confirmed_profiles: string[], downgraded_profiles: string[], note: string, evaluated_at_source: string, raw: object }}
+ */
 export function evaluate(targetDir) {
   const GS_HOME = resolveHome();
   const verifyJs = join(GS_HOME, 'scripts', 'verify.js');
