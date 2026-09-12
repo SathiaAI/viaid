@@ -17,7 +17,10 @@ name: Adversarial Review Gate
 #
 #   Blocking: CRITICAL-tier FAIL/BLOCKED verdicts fail the `review` job, so
 #   marking that job "required" in branch protection actually blocks the merge.
-#   SENSITIVE posts a report but the job doesn't fail.
+#   SENSITIVE does not block on verdict *content* (a FAIL/BLOCKED verdict still
+#   only posts a report) -- but as of SAT-1112 it DOES fail if the review never
+#   actually ran (see header note 7): a silently-skipped review can no longer
+#   report green on any non-NORMAL tier.
 #
 # NOT YET ACTIVE, and NOT ready to merge as-is -- two real open issues remain
 # (the original issue 1 is now resolved; renumbered from three to keep 2 and 3
@@ -49,12 +52,13 @@ name: Adversarial Review Gate
 #      design treats "can't verify" as BLOCKED (correctly, not silently PASS),
 #      but that's still a false-alarm risk worth fixing before this is required.
 #
-#   3. UNTESTED: --max-turns 80 below is a guess at enough headroom for the
-#      full Step 0-6 pipeline on a real diff; not verified against an actual
-#      run since this can't be executed from this sandbox. Same caveat now
-#      applies to the vendored skill itself -- this workflow has not yet been
-#      observed actually running panel.py/aggregate.py successfully in a real
-#      GitHub Actions job.
+#   3. RAISED 2026-09-10 (Paul greenlit thin fix on #21): --max-turns 80
+#      (was 40). Live SENSITIVE/CRITICAL runs exhausted 40 turns before
+#      Steps 0-6 could finish (known P3 on SAT-1014). 80 is the board
+#      default; no prior note preferred 100. Same caveat now applies to
+#      the vendored skill itself -- this workflow has not yet been
+#      observed actually running panel.py/aggregate.py successfully in a
+#      real GitHub Actions job.
 #
 #   4. RESOLVED 2026-08-14: fork PRs. `on: pull_request` (not pull_request_target,
 #      deliberately -- see below) means GitHub withholds repo secrets, including
@@ -87,6 +91,38 @@ name: Adversarial Review Gate
 #      job-level `env:` block, only in step contexts, so that version failed
 #      GitHub's own workflow-schema validation and produced zero check runs for the
 #      whole file, not just this step. See the step below.
+#
+#   6. RESOLVED 2026-09-10 (GitHub #20 P1 / SAT-1014, Paul greenlit Cursor):
+#      `.claude/settings.json` is PR-controlled and is NOT the enforcement root.
+#      The `review` job writes Claude Code managed settings to
+#      /etc/claude-code/managed-settings.json from a non-PR source (org/repo
+#      secret CLAUDE_MANAGED_SETTINGS, else the pin on the protected default
+#      branch, else a workflow-owned bootstrap copy) BEFORE claude-code-action.
+#      Parse-or-refuse: unreadable/unparseable/missing required keys fail the
+#      job hard. panel.py run is allowlisted only via the closed wrapper
+#      /usr/local/bin/ar-panel-run (no trailing :*). P2/P3/ops (git/gh
+#      wildcard wrappers, max-turns, artifacts, administration:read) stay out
+#      of scope.
+#
+#   7. SAT-1112 (2026-09-12, Option B build slice 1): close the silent-skip-to-green
+#      gap (problem #1 from the full 27-run audit). anthropics/claude-code-action
+#      soft-fails open -- it skips its own review steps when this workflow file
+#      differs from the default branch, yet the action and the job still report
+#      success (~48% of historical runs were skipped this way; 10 read as clean
+#      green, including the run that let PR #22 merge). The final step is now a
+#      positive-evidence attestation that runs for EVERY non-NORMAL tier (not just
+#      CRITICAL) with `if: always()`: the review genuinely ran iff aggregate.py wrote
+#      exactly one verdict.json under the job-owned $AR_RUN_DIR (under $RUNNER_TEMP,
+#      outside the PR checkout). No such verdict => the review did not run => fail
+#      loud, never green. Previously only CRITICAL enforced this, so SENSITIVE (the
+#      majority tier) skipped straight to green.
+#      SCOPE BOUNDARY: with `on: pull_request` the PR's own copy of this file defines
+#      the run, so a *malicious* PR can still edit or delete this step -- that is
+#      problem #4 (the reviewed PR controls its own gate) and is NOT closed here. It
+#      is closed in a later slice by moving enforcement to a required / SHA-pinned
+#      reusable workflow resolved from a protected ref. Slice 1 closes the common,
+#      non-adversarial silent-skip-to-green (stale branches, legit workflow edits,
+#      action errors): a correctness/honesty fix, not yet an adversarial defense.
 
 on:
   pull_request:
@@ -197,6 +233,284 @@ jobs:
           }
           echo "Found vendored adversarial-review skill."
 
+      # Issue #20 P1: enforcement root is Claude Code managed settings on the
+      # runner, written before Claude starts, from a non-PR source. Never use
+      # the PR checkout's .claude/settings.json as the policy file.
+      - name: Checkout enforcement pin from protected default branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: _viaid-enforcement-pin
+          persist-credentials: false
+          fetch-depth: 1
+
+      - name: Write Claude managed settings (non-PR source, parse-or-refuse)
+        env:
+          CLAUDE_MANAGED_SETTINGS: ${{ secrets.CLAUDE_MANAGED_SETTINGS }}
+          PIN_DIR: ${{ github.workspace }}/_viaid-enforcement-pin
+        run: |
+          set -euo pipefail
+          STAGE="$RUNNER_TEMP/trusted-enforcement"
+          DEST="/etc/claude-code/managed-settings.json"
+          WRAPPER_DEST="/usr/local/bin/ar-panel-run"
+          mkdir -p "$STAGE"
+          PIN_SETTINGS="$PIN_DIR/.github/claude-code/managed-settings.json"
+          PIN_CHECKER="$PIN_DIR/.github/claude-code/check-managed-settings.py"
+          PIN_WRAPPER="$PIN_DIR/.github/claude-code/ar-panel-run"
+
+          if [ -n "${CLAUDE_MANAGED_SETTINGS:-}" ]; then
+            printf '%s\n' "$CLAUDE_MANAGED_SETTINGS" > "$STAGE/managed-settings.json"
+            echo "managed-settings source=secret:CLAUDE_MANAGED_SETTINGS"
+          elif [ -f "$PIN_SETTINGS" ]; then
+            cp "$PIN_SETTINGS" "$STAGE/managed-settings.json"
+            echo "managed-settings source=protected-branch-pin:${{ github.event.pull_request.base.sha }}"
+          else
+            echo "managed-settings source=workflow-owned-bootstrap (pin not yet on protected default branch)"
+            cat > "$STAGE/managed-settings.json" <<'EOF'
+          {
+            "allowManagedPermissionRulesOnly": true,
+            "permissions": {
+              "defaultMode": "dontAsk",
+              "disableBypassPermissionsMode": "disable",
+              "disableAutoMode": "disable",
+              "allow": [
+                "Read",
+                "Write",
+                "Edit",
+                "Glob",
+                "Grep",
+                "LS",
+                "Bash(/usr/local/bin/ar-panel-run)",
+                "Bash(python .claude/skills/adversarial-review/scripts/panel.py init:*)",
+                "Bash(python3 .claude/skills/adversarial-review/scripts/panel.py init:*)",
+                "Bash(python .claude/skills/adversarial-review/scripts/panel.py assign:*)",
+                "Bash(python3 .claude/skills/adversarial-review/scripts/panel.py assign:*)",
+                "Bash(python .claude/skills/adversarial-review/scripts/panel.py prepare:*)",
+                "Bash(python3 .claude/skills/adversarial-review/scripts/panel.py prepare:*)",
+                "Bash(python .claude/skills/adversarial-review/scripts/panel.py ingest:*)",
+                "Bash(python3 .claude/skills/adversarial-review/scripts/panel.py ingest:*)",
+                "Bash(python .claude/skills/adversarial-review/scripts/panel.py rebuttal:*)",
+                "Bash(python3 .claude/skills/adversarial-review/scripts/panel.py rebuttal:*)",
+                "Bash(python .claude/skills/adversarial-review/scripts/panel.py concur:*)",
+                "Bash(python3 .claude/skills/adversarial-review/scripts/panel.py concur:*)",
+                "Bash(python .claude/skills/adversarial-review/scripts/gate.py plan:*)",
+                "Bash(python3 .claude/skills/adversarial-review/scripts/gate.py plan:*)",
+                "Bash(python .claude/skills/adversarial-review/scripts/gate.py record:*)",
+                "Bash(python3 .claude/skills/adversarial-review/scripts/gate.py record:*)",
+                "Bash(python .claude/skills/adversarial-review/scripts/aggregate.py)",
+                "Bash(python3 .claude/skills/adversarial-review/scripts/aggregate.py)",
+                "Bash(git diff:*)",
+                "Bash(git log:*)",
+                "Bash(git show:*)",
+                "Bash(git blame:*)",
+                "Bash(git ls-files:*)",
+                "Bash(git grep:*)",
+                "Bash(git rev-parse:*)",
+                "Bash(gh pr view:*)",
+                "Bash(gh pr diff:*)",
+                "Bash(gh api repos/SathiaAI/viaid/branches/main/protection)",
+                "Bash(npm ci --ignore-scripts)",
+                "Bash(npm install --ignore-scripts)"
+              ],
+              "deny": [
+                "Bash(python .claude/skills/adversarial-review/scripts/panel.py run:*)",
+                "Bash(python3 .claude/skills/adversarial-review/scripts/panel.py run:*)",
+                "Bash(python .claude/skills/adversarial-review/scripts/gate.py run:*)",
+                "Bash(python3 .claude/skills/adversarial-review/scripts/gate.py run:*)",
+                "Bash(git push:*)",
+                "Bash(git remote:*)",
+                "Bash(gh pr merge:*)",
+                "Bash(gh pr edit:*)",
+                "Bash(gh release:*)",
+                "Bash(npm publish:*)",
+                "Bash(curl:*)",
+                "Bash(wget:*)",
+                "Bash(rm -rf:*)",
+                "Bash(sudo:*)"
+              ]
+            }
+          }
+          EOF
+          fi
+
+          if [ -f "$PIN_WRAPPER" ]; then
+            cp "$PIN_WRAPPER" "$STAGE/ar-panel-run"
+            echo "wrapper source=protected-branch-pin"
+          else
+            echo "wrapper source=workflow-owned-bootstrap"
+            cat > "$STAGE/ar-panel-run" <<'EOF'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          if [[ $# -ne 0 ]]; then
+            echo "ERROR: ar-panel-run is a closed wrapper and accepts no arguments." >&2
+            exit 2
+          fi
+          if [[ -z "${AR_RUN_DIR:-}" ]]; then
+            echo "ERROR: AR_RUN_DIR is unset; refusing to run." >&2
+            exit 2
+          fi
+          if [[ "${AR_RUN_DIR}" != /* ]] || [[ ! -d "${AR_RUN_DIR}" ]]; then
+            echo "ERROR: AR_RUN_DIR must be an existing absolute directory (got ${AR_RUN_DIR})" >&2
+            exit 2
+          fi
+          CONTEXT=""
+          if [[ -f "${AR_RUN_DIR}/context.md" ]]; then
+            CONTEXT="${AR_RUN_DIR}/context.md"
+          else
+            shopt -s nullglob
+            matches=("${AR_RUN_DIR}"/run-*/context.md)
+            shopt -u nullglob
+            if [[ ${#matches[@]} -eq 0 ]]; then
+              echo "ERROR: no context.md under ${AR_RUN_DIR}" >&2
+              exit 2
+            fi
+            CONTEXT="${matches[-1]}"
+          fi
+          ROOT_REAL=$(readlink -f "${AR_RUN_DIR}")
+          CTX_REAL=$(readlink -f "${CONTEXT}")
+          case "${CTX_REAL}" in
+            "${ROOT_REAL}"/*) ;;
+            *)
+              echo "ERROR: context file resolves outside AR_RUN_DIR (${CTX_REAL})" >&2
+              exit 2
+              ;;
+          esac
+          if [[ -L "${CONTEXT}" ]] || [[ -L "${CTX_REAL}" ]]; then
+            echo "ERROR: context file is a symlink; refused (no-follow under AR_RUN_DIR)" >&2
+            exit 2
+          fi
+          if [[ ! -f "${CTX_REAL}" ]]; then
+            echo "ERROR: context file is not a regular file under AR_RUN_DIR (${CTX_REAL})" >&2
+            exit 2
+          fi
+          PANEL="${GITHUB_WORKSPACE:-.}/.claude/skills/adversarial-review/scripts/panel.py"
+          if [[ ! -f "${PANEL}" ]]; then
+            PANEL=".claude/skills/adversarial-review/scripts/panel.py"
+          fi
+          if [[ ! -f "${PANEL}" ]]; then
+            echo "ERROR: panel.py not found at ${PANEL}" >&2
+            exit 2
+          fi
+          exec python3 "${PANEL}" run --context-file "${CTX_REAL}"
+          EOF
+          fi
+
+          # Write as root so the PR checkout / Claude Write tool cannot replace it.
+          sudo mkdir -p /etc/claude-code
+          sudo rm -f "$DEST"
+          sudo cp "$STAGE/managed-settings.json" "$DEST"
+          sudo chmod 644 "$DEST"
+          sudo chown root:root "$DEST"
+          sudo rm -f "$WRAPPER_DEST"
+          sudo cp "$STAGE/ar-panel-run" "$WRAPPER_DEST"
+          sudo chmod 755 "$WRAPPER_DEST"
+          sudo chown root:root "$WRAPPER_DEST"
+
+          # Parse-or-refuse: fail hard if the dest is missing, unreadable, or
+          # unparseable. Prefer the protected-branch checker; otherwise a
+          # workflow-owned rebuild (do not copy Claude Code source).
+          if [ -f "$PIN_CHECKER" ]; then
+            python3 "$PIN_CHECKER" "$DEST"
+          else
+            python3 - "$DEST" <<'PY'
+          import json, re, stat, sys
+          from pathlib import Path
+          path = Path(sys.argv[1])
+          WRAPPER = "Bash(/usr/local/bin/ar-panel-run)"
+          PANEL_RUN_DENY = (
+              "Bash(python .claude/skills/adversarial-review/scripts/panel.py run:*)",
+              "Bash(python3 .claude/skills/adversarial-review/scripts/panel.py run:*)",
+          )
+          PANEL_RUN_CMDS = (
+              "python .claude/skills/adversarial-review/scripts/panel.py run",
+              "python3 .claude/skills/adversarial-review/scripts/panel.py run",
+              "python .claude/skills/adversarial-review/scripts/panel.py run --context-file x",
+              "python3 .claude/skills/adversarial-review/scripts/panel.py run --context-file x",
+          )
+          PANEL_PY_SUPERSET = re.compile(r"panel\.py(?:\s*:\*|\s*$|\s*\))")
+          def fail(msg):
+              print(f"ERROR: managed-settings parse-or-refuse: {msg}", file=sys.stderr)
+              raise SystemExit(1)
+          def bash_inner(rule):
+              if not rule.startswith("Bash(") or not rule.endswith(")"):
+                  return None
+              return rule[5:-1]
+          def bash_covers(inner, command):
+              if inner in ("*", "*:*") or inner.startswith("*:") or inner == "":
+                  return True
+              if inner.endswith(":*"):
+                  prefix = inner[:-2]
+                  if prefix in ("", "*"):
+                      return True
+                  return command == prefix or command.startswith(prefix)
+              return command == inner
+          def authorizes_panel_run(rule):
+              if "panel.py run" in rule or PANEL_PY_SUPERSET.search(rule):
+                  return True
+              inner = bash_inner(rule)
+              if inner is None:
+                  return False
+              return any(bash_covers(inner, cmd) for cmd in PANEL_RUN_CMDS)
+          if not path.exists():
+              fail(f"missing file: {path}")
+          try:
+              mode = path.lstat().st_mode
+          except OSError as exc:
+              fail(f"unreadable: {path}: {exc}")
+          if path.is_symlink() or not stat.S_ISREG(mode):
+              fail(f"not a regular file (symlink/dir refused): {path}")
+          try:
+              text = path.read_text(encoding="utf-8")
+          except OSError as exc:
+              fail(f"unreadable: {path}: {exc}")
+          if not text.strip():
+              fail(f"empty file: {path}")
+          try:
+              data = json.loads(text)
+          except json.JSONDecodeError as exc:
+              fail(f"unparseable JSON: {path}: {exc}")
+          if not isinstance(data, dict):
+              fail("top-level value must be a JSON object")
+          if data.get("allowManagedPermissionRulesOnly") is not True:
+              fail("allowManagedPermissionRulesOnly must be true")
+          perms = data.get("permissions")
+          if not isinstance(perms, dict):
+              fail("permissions must be an object")
+          if perms.get("defaultMode") != "dontAsk":
+              fail('permissions.defaultMode must be "dontAsk"')
+          if perms.get("disableBypassPermissionsMode") != "disable":
+              fail('permissions.disableBypassPermissionsMode must be "disable"')
+          if perms.get("disableAutoMode") != "disable":
+              fail('permissions.disableAutoMode must be "disable"')
+          allow = perms.get("allow")
+          if not isinstance(allow, list):
+              fail("permissions.allow must be an array")
+          for rule in allow:
+              if not isinstance(rule, str):
+                  fail("permissions.allow entries must be strings")
+              if rule == WRAPPER:
+                  continue
+              if rule == "Bash(*)" or rule.startswith("Bash(*"):
+                  fail("permissions.allow must not include Bash(*) or other unbounded Bash wildcards that re-enable panel.py run")
+              if authorizes_panel_run(rule):
+                  fail("permissions.allow must not authorize panel.py run except via exact " + WRAPPER)
+          if WRAPPER not in allow:
+              fail("permissions.allow must include exact Bash(/usr/local/bin/ar-panel-run)")
+          deny = perms.get("deny")
+          if not isinstance(deny, list):
+              fail("permissions.deny must be an array")
+          for required in PANEL_RUN_DENY:
+              if required not in deny:
+                  fail(f"permissions.deny must include exact {required}")
+          print(f"OK: managed-settings readable and parseable at {path}")
+          PY
+          fi
+          test -x "$WRAPPER_DEST" || {
+            echo "ERROR: closed wrapper missing or not executable: $WRAPPER_DEST" >&2
+            exit 1
+          }
+          echo "Enforcement root is $DEST (not the PR checkout)."
+
       - uses: anthropics/claude-code-action@5ef2e550a465a721f4f45e4a7d3c340c873e1dcc # v1
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
@@ -213,36 +527,74 @@ jobs:
             finding validation -- do not skip validation under time pressure.
             Write verdict.json per the skill's schema so the next workflow step
             can read it deterministically.
+            In this CI job, invoke the reviewer panel via the closed wrapper
+            `/usr/local/bin/ar-panel-run` (no arguments). Do not call
+            `panel.py run` directly. Write `context.md` under `$AR_RUN_DIR`
+            first. `panel.py concur --prompt-file` must point at a file under
+            `$AR_RUN_DIR`. Enforcement is Claude Code managed settings on the
+            runner, not `.claude/settings.json` in the checkout.
 
-      - name: Enforce verdict for CRITICAL tier
-        if: needs.classify.outputs.tier == 'CRITICAL'
+      # SAT-1112 (Option B build slice 1): positive-evidence attestation that the
+      # review ACTUALLY RAN, for every non-NORMAL tier -- closing the silent-skip-
+      # to-green gap (problem #1). See header note 7 for the full rationale and the
+      # scope boundary (this is NOT yet an adversarial defense against a PR that
+      # rewrites this step -- that's problem #4, a later slice).
+      #
+      # The real-execution signal is aggregate.py having written exactly one
+      # verdict.json under the job-owned $AR_RUN_DIR ($RUNNER_TEMP, OUTSIDE the PR
+      # checkout -- so a committed decoy cannot satisfy it). No verdict => the review
+      # did not run (claude-code-action silently skipped, or errored) => fail loud.
+      # `if: always()` so this runs even when an earlier step failed or the action
+      # reported a no-op success, and so the default "a prior step failed" rule can't
+      # skip it. Zero or multiple matches fail closed instead of guessing.
+      - name: Attest the review actually ran (all tiers) and enforce CRITICAL verdict
+        if: always()
         run: |
-          # Only trust a verdict.json under a real run directory ($AR_RUN_DIR/run-*/),
-          # and require there be exactly one. $AR_RUN_DIR is set (see job env above) to a
-          # path under $RUNNER_TEMP -- outside the checked-out working tree -- specifically
-          # so a malicious contributor cannot `git add -f` a fake run-*/verdict.json (e.g.
-          # {"verdict":"PASS"}) into the PR and have it picked up here. Matching on a
-          # run-*-shaped name inside the checkout alone was not sufficient: this step's own
-          # `if:` has no success()/always() guard, so it still runs even when the review
-          # step above fails or writes nothing -- a committed decoy would then be the only
-          # file present and would satisfy an "exactly one match" check on its own. Keeping
-          # the run directory itself out of the checkout closes that regardless of naming.
-          # Zero or multiple matches BLOCK instead of guessing.
+          set -uo pipefail
+          TIER="${{ needs.classify.outputs.tier }}"
+          if [ -z "${AR_RUN_DIR:-}" ]; then
+            echo "AR_RUN_DIR is unset -- cannot attest the review ran; failing closed."
+            exit 1
+          fi
           mapfile -t VERDICT_FILES < <(find "$AR_RUN_DIR" -mindepth 2 -maxdepth 2 \
             -path "$AR_RUN_DIR/run-*/verdict.json" 2>/dev/null | sort)
           if [ "${#VERDICT_FILES[@]}" -eq 0 ]; then
-            echo "No verdict.json produced under a run-* directory -- treating as BLOCKED, not silently passing."
+            echo "No verdict.json under \$AR_RUN_DIR/run-*/ -- the adversarial review did not"
+            echo "actually run. Most likely claude-code-action silently skipped because this"
+            echo "PR's copy of the workflow file differs from the default branch (often a branch"
+            echo "that has drifted behind main, or a PR that edits this workflow). Failing loudly"
+            echo "instead of reporting a false green (SAT-1112). Fix: update the branch to the"
+            echo "latest main and re-run; a PR that intentionally changes this gate needs manual"
+            echo "maintainer review until the protected-ref reusable-workflow slice lands."
             exit 1
           fi
           if [ "${#VERDICT_FILES[@]}" -gt 1 ]; then
-            echo "Multiple run-*/verdict.json files found -- ambiguous, treating as BLOCKED:"
+            echo "Multiple run-*/verdict.json files found -- ambiguous, failing closed:"
             printf '  %s\n' "${VERDICT_FILES[@]}"
             exit 1
           fi
           VERDICT_FILE="${VERDICT_FILES[0]}"
-          VERDICT=$(jq -r '.verdict' "$VERDICT_FILE")
-          echo "Verdict ($VERDICT_FILE): $VERDICT"
-          if [ "$VERDICT" != "PASS" ]; then
-            echo "CRITICAL-tier verdict is $VERDICT -- failing this required check."
+          # A schema-valid verdict is necessary (not sufficient) proof of a real run:
+          # reject an empty/truncated/garbage file rather than treat its mere presence
+          # as success.
+          if ! jq -e . "$VERDICT_FILE" >/dev/null 2>&1; then
+            echo "verdict.json at $VERDICT_FILE is not valid JSON -- failing closed."
             exit 1
+          fi
+          VERDICT=$(jq -r '.verdict // empty' "$VERDICT_FILE")
+          case "$VERDICT" in
+            PASS|FAIL|BLOCKED) ;;
+            *)
+              echo "verdict.json has no recognised .verdict (got: '${VERDICT:-<none>}') -- failing closed."
+              exit 1
+              ;;
+          esac
+          echo "Attested: the review executed. Tier=$TIER Verdict=$VERDICT ($VERDICT_FILE)"
+          if [ "$TIER" = "CRITICAL" ] && [ "$VERDICT" != "PASS" ]; then
+            echo "CRITICAL-tier verdict is $VERDICT -- failing this check."
+            exit 1
+          fi
+          if [ "$VERDICT" != "PASS" ]; then
+            echo "$TIER-tier verdict is $VERDICT -- advisory only (SENSITIVE does not block on"
+            echo "verdict content); the review DID run, which is what this step enforces here."
           fi
