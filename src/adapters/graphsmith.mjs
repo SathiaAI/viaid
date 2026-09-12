@@ -10,7 +10,10 @@
 // unset. On a shared/multi-tenant host that path is world-writable and guessable, so anyone
 // could pre-place a `scripts/verify.js` there and have it silently spawned as if it were the
 // real GraphSmith verifier. Fixed: no fallback — the env var must be set explicitly, or every
-// call fails loudly instead of trusting a guessable shared path.
+// call fails loudly instead of trusting a guessable shared path. (Parity fix: the original
+// SAT-960 pass only landed this in skill/src/adapters/graphsmith.mjs; this copy is the one
+// package.json's `files` actually ships, so it stayed vulnerable in the published package
+// until now.)
 //
 // Two GraphSmith surfaces (see TECHNICAL/35-REUSE-MAP): we use `verify.js --profiles`
 // (repo-level capability profiles, zero-dep, always runnable). A full deployment would
@@ -21,6 +24,7 @@ import { spawnSync } from 'node:child_process';
 import { join } from 'node:path';
 import { existsSync } from 'node:fs';
 
+/** Return GRAPHSMITH_HOME, or throw if unset (no shared-path fallback). */
 function resolveHome() {
   const home = process.env.GRAPHSMITH_HOME;
   if (!home) {
@@ -33,13 +37,18 @@ function resolveHome() {
   return home;
 }
 
+/** True when GRAPHSMITH_HOME is set and scripts/verify.js exists there. */
 export function graphsmithAvailable() {
   const home = process.env.GRAPHSMITH_HOME;
   if (!home) return false;
   return existsSync(join(home, 'scripts', 'verify.js'));
 }
 
-// evaluate(targetDir) -> { engine, status, confirmed_profiles[], downgraded_profiles[], note, evaluated_at_source, raw }
+/**
+ * Run GraphSmith verify.js --profiles on targetDir.
+ * @param {string} targetDir
+ * @returns {{ engine: string, status: string, confirmed_profiles: string[], downgraded_profiles: string[], note: string, evaluated_at_source: string, raw: object }}
+ */
 export function evaluate(targetDir) {
   const GS_HOME = resolveHome();
   const verifyJs = join(GS_HOME, 'scripts', 'verify.js');
