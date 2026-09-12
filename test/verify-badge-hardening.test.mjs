@@ -1,6 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { verifyBadge } from "../src/agentid.mjs";
+import { verifyBadge, mintBadge } from "../src/agentid.mjs";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 // SAT-1009: regression tests for crash bugs the fuzz harness (test/fuzz/verify-badge.fuzz.mjs)
 // found in verifyBadge() on `main` — malformed/adversarial badge JSON threw an uncaught
@@ -51,4 +54,47 @@ test("verifyBadge on a well-formed empty object still fails closed (no signature
   const v = verifyBadge({});
   assert.equal(v.verdict, "INVALID");
   assert.equal(v.freshness_state !== "FRESH", true, "an empty object must never verify as FRESH/VALID");
+});
+
+// SAT-1009 (CodeRabbit follow-up): the cases above are all negative (malformed/adversarial ->
+// INVALID). Nothing pinned the POSITIVE path -- a genuine, freshly-minted badge must verify as
+// VALID -- so a regression that made verifyBadge() over-reject a legitimate badge would have
+// slipped through both this suite and the fuzz harness (the harness is deliberately a negative
+// oracle: no-crash + no-bypass, and a byte-mutating fuzzer cannot forge the three Ed25519
+// signatures a VALID verdict requires, so it can never reach VALID on its own). These three
+// deterministic cases close that gap and bracket the authenticity check from both sides.
+
+test("verifyBadge on a genuine freshly-minted badge returns VALID / FRESH (positive path)", () => {
+  const work = mkdtempSync(join(tmpdir(), "viaid-verify-pos-"));
+  try {
+    const badge = mintBadge({ name: "positive-path", workRoot: work });
+    const v = verifyBadge(badge);
+    assert.equal(v.verdict, "VALID", "a genuine freshly-minted badge must verify as VALID");
+    assert.equal(v.freshness_state, "FRESH");
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("verifyBadge rejects a genuine badge whose owner signature was tampered (-> INVALID)", () => {
+  const work = mkdtempSync(join(tmpdir(), "viaid-verify-sig-"));
+  try {
+    const badge = mintBadge({ name: "tampered-sig", workRoot: work });
+    // flip the first 4 base64 chars of the owner signature -- breaks it without changing the core
+    badge.signatures.owner_sig = "AAAA" + badge.signatures.owner_sig.slice(4);
+    assert.equal(verifyBadge(badge).verdict, "INVALID");
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
+});
+
+test("verifyBadge rejects a genuine badge whose agent_id no longer matches its inception (-> INVALID)", () => {
+  const work = mkdtempSync(join(tmpdir(), "viaid-verify-id-"));
+  try {
+    const badge = mintBadge({ name: "tampered-id", workRoot: work });
+    badge.agent_id = "via_" + "0".repeat(32); // valid shape, wrong value -> recomputed != agent_id
+    assert.equal(verifyBadge(badge).verdict, "INVALID");
+  } finally {
+    rmSync(work, { recursive: true, force: true });
+  }
 });
