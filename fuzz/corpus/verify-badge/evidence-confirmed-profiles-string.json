@@ -1,0 +1,11 @@
+{
+  "schema": "viaid.badge/0.1",
+  "inception": {},
+  "keys": {},
+  "log": [],
+  "evidence": {
+    "status": "PASS",
+    "confirmed_profiles": "oops-a-string",
+    "downgraded_profiles": "oops-too"
+  }
+}

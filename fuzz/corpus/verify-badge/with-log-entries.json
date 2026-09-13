@@ -1,0 +1,51 @@
+{
+  "schema": "viaid.badge/0.1",
+  "agent_id": "via_063219c2b1532e3529b0c1fefe726f2d",
+  "inception": {
+    "schema": "viaid.badge/0.1",
+    "name": "fuzz-seed-log",
+    "owner_id": "local-dev",
+    "owner_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "agent_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "voucher_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "next_key_commitment": "2816ef2f4699efd025669ab7ad7c561c43b019c34e1a366fbfa9262cdfecfd3a",
+    "key_seq": 0,
+    "issued_at": "2026-08-28T00:00:00.000Z",
+    "badge_ttl": 7776000
+  },
+  "keys": {
+    "owner_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "agent_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "voucher_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ=="
+  },
+  "key_seq": 0,
+  "next_key_commitment": "2816ef2f4699efd025669ab7ad7c561c43b019c34e1a366fbfa9262cdfecfd3a",
+  "last_rotation_reason": null,
+  "last_rotation_at": null,
+  "assurance_tier": "SELF",
+  "revocation_state": "FRESH",
+  "evidence": null,
+  "log": [
+    {
+      "seq": 0,
+      "action": "deployed",
+      "model_used": "claude-sonnet",
+      "detail": null,
+      "prev_hash": "GENESIS",
+      "entry_hash": "c020b4b96c732bb2f90b939c16bf6aad391142268daa79c16e2dcdc055345eb5"
+    },
+    {
+      "seq": 1,
+      "action": "called payments API",
+      "model_used": "claude-sonnet",
+      "detail": null,
+      "prev_hash": "c020b4b96c732bb2f90b939c16bf6aad391142268daa79c16e2dcdc055345eb5",
+      "entry_hash": "268ff5468473bdb44b1a25506aa2da1516ca05d5d061808bafd72a91bffb4d37"
+    }
+  ],
+  "signatures": {
+    "owner_sig": "Z2FyYmFnZS1ub3QtYS1yZWFsLXNpZ25hdHVyZQ==",
+    "agent_sig": "Z2FyYmFnZS1ub3QtYS1yZWFsLXNpZ25hdHVyZQ==",
+    "voucher_sig": "Z2FyYmFnZS1ub3QtYS1yZWFsLXNpZ25hdHVyZQ=="
+  }
+}
