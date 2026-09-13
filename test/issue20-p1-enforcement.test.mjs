@@ -413,28 +413,38 @@ test("closed wrapper refuses an in-tree context.md symlink (no-follow)", () => {
   }
 });
 
-test("workflow writes managed settings from a non-PR source before Claude", () => {
+test("workflow adopts the pinned adversarial-review action (SAT-1117)", () => {
   const yml = fs.readFileSync(
     path.join(repoRoot, ".github", "workflows", "adversarial-review-gate.yml"),
     "utf8",
   );
-  const writeIdx = yml.indexOf("Write Claude managed settings (non-PR source, parse-or-refuse)");
-  const claudeIdx = yml.indexOf("anthropics/claude-code-action@");
-  assert.ok(writeIdx !== -1, "missing managed-settings write step");
-  assert.ok(claudeIdx !== -1, "missing claude-code-action step");
-  assert.ok(writeIdx < claudeIdx, "managed settings must be written before claude-code-action");
-  assert.match(yml, /\/etc\/claude-code\/managed-settings\.json/);
-  assert.match(yml, /secrets\.CLAUDE_MANAGED_SETTINGS/);
-  assert.match(yml, /_viaid-enforcement-pin/);
-  assert.match(yml, /github\.event\.pull_request\.base\.sha/);
-  assert.match(yml, /workflow-owned-bootstrap/);
-  assert.match(yml, /parse-or-refuse/);
-  assert.match(yml, /disableAutoMode must be "disable"/);
-  assert.match(yml, /Bash\(\*\)/);
-  assert.match(yml, /permissions\.deny must include/);
+  // New architecture (SAT-1117): the review job consumes the published
+  // adversarial-review action, SHA-pinned for supply-chain safety, and no longer
+  // uses the hand-rolled claude-code-action + managed-settings apparatus.
+  assert.match(
+    yml,
+    /uses:\s*SathiaAI\/adversarial-review@[0-9a-f]{40}\b/,
+    "review job must use the adversarial-review action pinned to a 40-char commit SHA",
+  );
+  assert.match(
+    yml,
+    /openrouter-api-key:\s*\$\{\{\s*secrets\.OPENROUTER_API_KEY\s*\}\}/,
+    "action must receive OPENROUTER_API_KEY from secrets",
+  );
+  assert.match(
+    yml,
+    /risk:\s*\$\{\{\s*needs\.classify\.outputs\.tier\s*\}\}/,
+    "action risk must come from the deterministic classify job",
+  );
+  // The removed apparatus must not creep back in.
   assert.doesNotMatch(
-    yml.slice(writeIdx, claudeIdx),
-    /cp\s+[^\n]*\.claude\/settings\.json/,
-    "write step must not copy PR-controlled .claude/settings.json",
+    yml,
+    /anthropics\/claude-code-action@/,
+    "claude-code-action panel path was removed (SAT-1117) and must not return",
+  );
+  assert.doesNotMatch(
+    yml,
+    /\/etc\/claude-code\/managed-settings\.json/,
+    "managed-settings enforcement was removed (SAT-1117) and must not return",
   );
 });
