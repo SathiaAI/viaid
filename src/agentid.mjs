@@ -67,6 +67,23 @@ function verifyB64(pubB64, msg, sigB64) {
   } catch { return false; }
 }
 
+// ---- SAT-959: agent_id/id format validation, enforced before ANY path is built from one ----
+// Exact shape mintBadge() below actually produces: 'via_' + 32 lowercase hex chars. Anything
+// else — path separators, '..', absolute paths, wrong length — is refused outright rather than
+// reaching join(). Checked at every entry point that turns an externally-influenced id (a CLI
+// arg in bin/viaid.mjs, or a loaded badge's own `.agent_id` field, which is attacker-controlled
+// in a crafted badge.json) into a filesystem path.
+const AGENT_ID_RE = /^via_[0-9a-f]{32}$/;
+export function isValidAgentId(id) {
+  return typeof id === 'string' && AGENT_ID_RE.test(id);
+}
+function assertValidAgentId(id) {
+  if (!isValidAgentId(id)) {
+    throw new Error(`invalid agent id (expected via_<32 lowercase hex>, got ${JSON.stringify(id)}) — refusing to build a path from it`);
+  }
+  return id;
+}
+
 // ---- keystore (PROTOTYPE ONLY) ----
 // SAT-957 (CRITICAL, fixed here to match VIAID-LOCKED/prototype and skill copies, 2026-08-02):
 // this file previously wrote the keystore with no restrictive file mode (0644/world-readable).
@@ -75,7 +92,7 @@ function verifyB64(pubB64, msg, sigB64) {
 // ignored for a pre-existing file written before this fix. Honest disclosure (ported from the
 // other two copies' comment): meaningful protection on Linux/macOS (POSIX bits), but does NOT
 // by itself achieve equivalent protection on Windows, where NTFS ACLs govern real access control.
-function keystorePath(root, agentId) { return join(root, '.keys', agentId + '.json'); }
+function keystorePath(root, agentId) { return join(root, '.keys', assertValidAgentId(agentId) + '.json'); }
 function saveKeys(root, agentId, keys) {
   const p = keystorePath(root, agentId);
   mkdirSync(dirname(p), { recursive: true });
