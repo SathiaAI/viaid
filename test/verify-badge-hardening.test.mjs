@@ -80,8 +80,10 @@ test("verifyBadge rejects a genuine badge whose owner signature was tampered (->
   const work = mkdtempSync(join(tmpdir(), "viaid-verify-sig-"));
   try {
     const badge = mintBadge({ name: "tampered-sig", workRoot: work });
-    // flip the first 4 base64 chars of the owner signature -- breaks it without changing the core
-    badge.signatures.owner_sig = "AAAA" + badge.signatures.owner_sig.slice(4);
+    // flip the first base64 char to a guaranteed-different one so the signature always
+    // changes (a freshly minted sig can itself begin with "AAAA"), breaking it deterministically
+    const first = badge.signatures.owner_sig[0];
+    badge.signatures.owner_sig = (first === "A" ? "B" : "A") + badge.signatures.owner_sig.slice(1);
     assert.equal(verifyBadge(badge).verdict, "INVALID");
   } finally {
     rmSync(work, { recursive: true, force: true });
