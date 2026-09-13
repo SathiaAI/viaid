@@ -1,0 +1,51 @@
+{
+  "schema": "viaid.badge/0.1",
+  "agent_id": "via_5e7680c1e613550a9934709c90622210",
+  "inception": {
+    "schema": "viaid.badge/0.1",
+    "name": "fuzz-seed-rot",
+    "owner_id": "local-dev",
+    "owner_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "agent_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "voucher_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "next_key_commitment": "5e6bbdd3f5b1110f439bbcf72b32c73153d3247785008c95b843d11b7a5184e6",
+    "key_seq": 0,
+    "issued_at": "2026-08-28T00:00:00.000Z",
+    "badge_ttl": 7776000
+  },
+  "keys": {
+    "owner_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "agent_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "voucher_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ=="
+  },
+  "key_seq": 1,
+  "next_key_commitment": "d9ce4908e4f153f03070b27afb8cf94d901401cca51fa98aa697b125a280a46a",
+  "last_rotation_reason": "routine",
+  "last_rotation_at": "2026-08-28T00:05:00.000Z",
+  "assurance_tier": "SELF",
+  "revocation_state": "FRESH",
+  "evidence": null,
+  "log": [
+    {
+      "seq": 0,
+      "action": "ROTATION",
+      "model_used": null,
+      "detail": {
+        "prev_key_seq": 0,
+        "new_key_seq": 1,
+        "revealed_next_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+        "prior_commitment": "5e6bbdd3f5b1110f439bbcf72b32c73153d3247785008c95b843d11b7a5184e6",
+        "new_next_key_commitment": "d9ce4908e4f153f03070b27afb8cf94d901401cca51fa98aa697b125a280a46a",
+        "reason": "routine"
+      },
+      "voucher_attestation": "Z2FyYmFnZS1ub3QtYS1yZWFsLXNpZ25hdHVyZQ==",
+      "prev_hash": "GENESIS",
+      "entry_hash": "ad1ead0b149f4a2d1ee7a5fe44c7e7523dca2a5fbb29261f129f2d19350249c3"
+    }
+  ],
+  "signatures": {
+    "owner_sig": "Z2FyYmFnZS1ub3QtYS1yZWFsLXNpZ25hdHVyZQ==",
+    "agent_sig": "Z2FyYmFnZS1ub3QtYS1yZWFsLXNpZ25hdHVyZQ==",
+    "voucher_sig": "Z2FyYmFnZS1ub3QtYS1yZWFsLXNpZ25hdHVyZQ=="
+  }
+}

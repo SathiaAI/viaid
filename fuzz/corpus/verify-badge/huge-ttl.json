@@ -1,0 +1,9 @@
+{
+  "schema": "viaid.badge/0.1",
+  "inception": {
+    "issued_at": "2026-08-28T00:00:00.000Z",
+    "badge_ttl": null
+  },
+  "keys": {},
+  "log": []
+}

@@ -1,0 +1,34 @@
+{
+  "schema": "viaid.badge/0.1",
+  "agent_id": "via_9470d1cf813812cfb390e71ccc99b200",
+  "inception": {
+    "schema": "viaid.badge/0.1",
+    "name": "fuzz-seed-agent",
+    "owner_id": "local-dev",
+    "owner_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "agent_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "voucher_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "next_key_commitment": "4e85a12ce263480a13573ca7c1974808d12e843b34a9a2d3252144182989aa7a",
+    "key_seq": 0,
+    "issued_at": "2026-08-28T00:00:00.000Z",
+    "badge_ttl": 7776000
+  },
+  "keys": {
+    "owner_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "agent_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ==",
+    "voucher_pub": "Z2FyYmFnZS1ub3QtYS1yZWFsLXB1YmtleQ=="
+  },
+  "key_seq": 0,
+  "next_key_commitment": "4e85a12ce263480a13573ca7c1974808d12e843b34a9a2d3252144182989aa7a",
+  "last_rotation_reason": null,
+  "last_rotation_at": null,
+  "assurance_tier": "SELF",
+  "revocation_state": "FRESH",
+  "evidence": null,
+  "log": [],
+  "signatures": {
+    "owner_sig": "Z2FyYmFnZS1ub3QtYS1yZWFsLXNpZ25hdHVyZQ==",
+    "agent_sig": "Z2FyYmFnZS1ub3QtYS1yZWFsLXNpZ25hdHVyZQ==",
+    "voucher_sig": "Z2FyYmFnZS1ub3QtYS1yZWFsLXNpZ25hdHVyZQ=="
+  }
+}
