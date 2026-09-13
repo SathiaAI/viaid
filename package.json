@@ -31,5 +31,11 @@
     "gemini",
     "cursor"
   ],
-  "license": "MIT"
+  "license": "MIT",
+  "scripts": {
+    "fuzz:verify-badge": "mkdir -p .jazzer-corpus/verify-badge && jazzer fuzz/verify-badge.fuzz.mjs .jazzer-corpus/verify-badge fuzz/corpus/verify-badge --sync -- -max_total_time=60 -max_len=16384"
+  },
+  "devDependencies": {
+    "@jazzer.js/core": "^4.0.0"
+  }
 }

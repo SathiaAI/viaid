@@ -1,0 +1,13 @@
+{
+  "schema": "viaid.badge/0.1",
+  "inception": {},
+  "keys": {},
+  "log": [
+    1,
+    "two",
+    null,
+    [
+      3
+    ]
+  ]
+}
