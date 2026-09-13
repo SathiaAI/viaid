@@ -13,7 +13,7 @@ name: Adversarial Review Gate
 # repo's #19) runs the panel directly via OpenRouter -- no claude-code-action, no
 # managed-settings wall -- records gates through gate.py, and computes + enforces the
 # machine verdict via aggregate.py. viaid already holds OPENROUTER_API_KEY, so the
-# panel runs. Pinned to the exact release tag @v0.2.0 (commit 3438615) so the gate
+# panel runs. Pinned to the exact commit 3438615 (release v0.2.0) so the gate
 # cannot silently drift again.
 #
 # Kept: the deterministic, path-based classify job (SAT-1014, 2026-08-13), now fed to
@@ -108,11 +108,14 @@ jobs:
         with:
           python-version: '3.12'
 
-      - uses: SathiaAI/adversarial-review@v0.2.0
+      - uses: SathiaAI/adversarial-review@343861548fbf58fb1d69c521d33ea38d2ea6f00b # v0.2.0
         with:
           # Deterministic tier from the classify job above (NORMAL is filtered out
           # by the job-level if:). The action resolves gates/policy from the tier.
           risk: ${{ needs.classify.outputs.tier }}
+          # Claude develops viaid, so anthropic is excluded from the reviewer
+          # panel (conflict-of-interest); the panel reviews via other providers.
+          dev-providers: anthropic
           product: viaid
           # gates: newline-separated name=command; each runs through gate.py and is
           # recorded for the verdict. Starter set while adopting; ci.yml still runs
