@@ -1,36 +1,19 @@
 name: Adversarial Review Gate
 
-# SAT-1117: consume the published adversarial-review action instead of a vendored
-# copy + hand-rolled claude-code-action panel.
+# SAT-1117 Phase 1 — the "honest gate".
 #
-# Why this change: viaid vendored a badly stale snapshot of the adversarial-review
-# skill under .claude/skills/adversarial-review/ and drove it with anthropics/
-# claude-code-action under a managed-settings allow-list that denied `panel.py run`.
-# The panel therefore never completed, aggregate.py wrote no verdict.json, and the
-# fail-closed enforcement failed the `review` job on every PR (#15/#16/#17).
+# The review job records the FULL required gate set (build/unit/secrets/deps/sast) as real
+# scanners, so the adversarial panel actually transmits and reviews the diff, and the verdict
+# is a real PASS — not a tolerated BLOCKED shown as green ("hollow green"). Enforced by
+# `fail-on: blocked` at every tier PLUS a loud verifier that fails the job unless the action
+# returned verdict==PASS. mutation is deferred (SAT-1008), represented as a visible waiver in
+# .adversarial-review.yml with a red expiry check below — never faked as a passing gate.
 #
-# The published action (SathiaAI/adversarial-review, GitHub Action shipped in that
-# repo's #19) runs the panel directly via OpenRouter -- no claude-code-action, no
-# managed-settings wall -- records gates through gate.py, and computes + enforces the
-# machine verdict via aggregate.py. viaid already holds OPENROUTER_API_KEY, so the
-# panel runs. Pinned to the exact commit 3438615 (release v0.2.0) so the gate
-# cannot silently drift again.
-#
-# Kept: the deterministic, path-based classify job (SAT-1014, 2026-08-13), now fed to
-# the action's `risk` input. NORMAL PRs still skip the panel (ci.yml + CodeRabbit
-# already cover them). The fork-PR fast-fail guard is kept (fork PRs get no repo
-# secrets, so the panel cannot run -- fail honestly, a maintainer reviews manually).
-#
-# DRAFT / adoption posture (follows the product's own examples/adversarial-review.yml):
-# fail-on: fail while adopting -- a real FAIL fails the job; a BLOCKED verdict
-# (e.g. gate coverage still being wired up) is tolerated as a warning. Fast-follows
-# tracked in SAT-1117:
-#   - tighten CRITICAL to fail-on: blocked once gate coverage is confirmed;
-#   - expand `gates` to secrets/deps/sast (mutation is deferred per SAT-1008) with the
-#     adversarial-review sessions on the supported consumer pattern -- today ci.yml
-#     still enforces secrets/deps/sast independently;
-#   - delete the now-unused vendored .claude/skills/adversarial-review/ and the
-#     .github/claude-code/ enforcement pin (this PR only repoints the workflow).
+# Phase 2 — credential isolation (a PR's own build/test code must never execute in the same job
+# as the OpenRouter key) — is blocked on an adversarial-review product capability (panel-only
+# from pre-recorded gates), tracked in SathiaAI/adversarial-review#61, plus an org ruleset that
+# makes this check tamper-proof (owner-configured). Until then: npm ci --ignore-scripts,
+# pull_request only, fork PRs honest-red, and CODEOWNERS on the gate-defining files.
 
 on:
   pull_request:
@@ -48,6 +31,14 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - name: Deferred-gate waiver not expired (SAT-1008)
+        run: |
+          # mutation testing is deferred per SAT-1008 and omitted from required_gates.
+          # This fails red once the waiver's review-by date passes, so it cannot rot silently.
+          if [ "$(date -u +%Y%m%d)" -gt 20261231 ]; then
+            echo "::error::mutation-gate deferral (SAT-1008) expired 2026-12-31 — re-evaluate before continuing"
+            exit 1
+          fi
       - id: classify
         run: |
           # Path-based risk-tier classification (SAT-1014 decision, 2026-08-13).
@@ -81,19 +72,19 @@ jobs:
     permissions:
       contents: read
       pull-requests: write
+    env:
+      # Lower-value secret; gitleaks (org-licensed) needs it. The high-value OpenRouter key is an
+      # action input, not env. Phase 2 (#61) removes even this from any PR-code-executing job.
+      GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
     steps:
-      # Fork PRs do not receive repo secrets (GitHub's own design), so
-      # OPENROUTER_API_KEY would be empty and the panel could not run. Fail fast
-      # with an honest reason instead of a confusing BLOCKED -- a maintainer reviews
-      # fork PRs manually before merging.
+      # Fork PRs get no repo secrets, so the panel cannot run and gitleaks is unlicensed. Fail
+      # fast with an honest reason instead of a confusing BLOCKED — a maintainer reviews forks.
       - name: Stop early and clearly if this is a fork PR
         if: github.event.pull_request.head.repo.fork
         run: |
           echo "This PR is from a fork ($HEAD_REPO -> $BASE_REPO)."
-          echo "GitHub does not pass repository secrets (including OPENROUTER_API_KEY)"
-          echo "to pull_request runs for fork-originated PRs -- deliberate GitHub behavior,"
-          echo "not a bug in this workflow. Automated adversarial-review cannot run;"
-          echo "a maintainer must review this PR manually before merging."
+          echo "GitHub does not pass repository secrets to fork-originated PRs; automated review"
+          echo "cannot run. A maintainer must review this PR manually before merging."
           exit 1
         env:
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
@@ -101,29 +92,66 @@ jobs:
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          fetch-depth: 0   # the panel reviews a real git range
+          fetch-depth: 0
           persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
 
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.12'
 
+      - name: Install pinned gate scanners
+        run: |
+          set -euo pipefail
+          # gitleaks (secrets gate) — pinned; matches viaid's ci.yml scanner family
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_linux_x64.tar.gz \
+            | tar -xz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          # osv-scanner (deps gate) — pinned binary
+          curl -sSfL https://github.com/google/osv-scanner/releases/download/v2.0.2/osv-scanner_linux_amd64 \
+            -o /tmp/osv-scanner
+          sudo install -m 0755 /tmp/osv-scanner /usr/local/bin/osv-scanner
+          # semgrep (sast gate) — pinned to viaid's ci.yml version
+          python -m pip install --quiet semgrep==1.171.0
+          gitleaks version && osv-scanner --version && semgrep --version
+
+      - name: Install deps (no lifecycle scripts — PR code cannot exfil creds via npm hooks)
+        run: npm ci --ignore-scripts
+
       - uses: SathiaAI/adversarial-review@343861548fbf58fb1d69c521d33ea38d2ea6f00b # v0.2.0
+        id: ar
         with:
-          # Deterministic tier from the classify job above (NORMAL is filtered out
-          # by the job-level if:). The action resolves gates/policy from the tier.
+          # Deterministic tier from classify (NORMAL is filtered out by the job-level if:).
           risk: ${{ needs.classify.outputs.tier }}
-          # Claude develops viaid, so anthropic is excluded from the reviewer
-          # panel (conflict-of-interest); the panel reviews via other providers.
+          # Claude develops viaid → excluded from the reviewer panel (COI); panel uses other providers.
           dev-providers: anthropic
           product: viaid
-          # gates: newline-separated name=command; each runs through gate.py and is
-          # recorded for the verdict. Starter set while adopting; ci.yml still runs
-          # secrets/deps/sast as independent required checks.
+          # Real scanner CLIs recorded as gates so the panel transmits and the verdict is real.
+          # required_gates (all tiers) = build,unit,secrets,deps,sast — see .adversarial-review.yml.
           gates: |
-            build=node --test
-            fuzz=npm ci && npm run fuzz:verify-badge
-          # Adoption posture: fail the job only on a real FAIL; tolerate BLOCKED as a
-          # warning (SAT-1117 fast-follow tightens CRITICAL to 'blocked').
-          fail-on: fail
+            build=npm pack --dry-run
+            unit=node --test
+            secrets=gitleaks detect --no-banner --redact --source . --exit-code 1
+            deps=osv-scanner --lockfile=package-lock.json
+            sast=semgrep scan --config p/default --error
+          # Honest posture: FAIL or BLOCKED fails the job. `fail-on: fail` (the hollow-green
+          # mechanism) is deliberately NOT used.
+          fail-on: blocked
           openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
+
+      - name: Assert a real PASS — no hollow green
+        if: always()
+        run: |
+          echo "adversarial-review: outcome='${{ steps.ar.outcome }}' verdict='${{ steps.ar.outputs.verdict }}'"
+          if [ "${{ steps.ar.outcome }}" != "success" ]; then
+            echo "::error::adversarial-review step did not succeed (verdict='${{ steps.ar.outputs.verdict }}'). The review did not pass."
+            exit 1
+          fi
+          if [ "${{ steps.ar.outputs.verdict }}" != "PASS" ]; then
+            echo "::error::adversarial-review verdict is not PASS (got '${{ steps.ar.outputs.verdict }}'). A green check must mean a real, complete panel review."
+            exit 1
+          fi
+          echo "Verified: real PASS with a complete, independent panel."

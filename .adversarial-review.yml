@@ -1,0 +1,13 @@
+# Policy as code for viaid's adversarial-review gate (SAT-1117).
+# Explicit per-tier required_gates so the panel's transmit precondition and the machine verdict
+# are deterministic (not left to the action's defaults, which can change on a version bump).
+risk: NORMAL
+dev_providers:
+  - anthropic            # Claude develops viaid, so Claude never reviews it (conflict of interest)
+required_gates:
+  NORMAL:    [build, unit, secrets, deps, sast]
+  SENSITIVE: [build, unit, secrets, deps, sast]
+  CRITICAL:  [build, unit, secrets, deps, sast]
+# mutation testing is DEFERRED (SAT-1008): intentionally omitted from required_gates above and
+# NEVER recorded as a passing gate. It is a visible, time-boxed waiver — the workflow's
+# "Deferred-gate waiver not expired" step fails red past 2026-12-31 so it cannot rot silently.
