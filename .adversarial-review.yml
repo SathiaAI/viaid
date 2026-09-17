@@ -11,3 +11,15 @@ required_gates:
 # mutation testing is DEFERRED (SAT-1008): intentionally omitted from required_gates above and
 # NEVER recorded as a passing gate. It is a visible, time-boxed waiver — the workflow's
 # "Deferred-gate waiver not expired" step fails red past 2026-12-31 so it cannot rot silently.
+
+# Reviewer model pins (SAT-1117). The action auto-picks reviewer models from OpenRouter's live
+# catalog with a deterministic picker. For 2 roles that picker lands on a dead slug
+# (openai/gpt-6-astra 404s under SENSITIVE zero-retention + strict-schema routing) and on reasoning
+# models that return empty content on a real diff, and its single substitution stays in the same
+# bad pool -> a deterministic false BLOCKED. These 2 pins force known-good, INDEPENDENT families
+# (each validated directly against the exact strict routing) so the panel completes honestly.
+# Upstream fix tracked so pins become unnecessary: auto-pick liveness check + substitute across the
+# full remaining pool + treat empty content as a failed attempt.
+pins:
+  test_quality: nvidia/nemotron-3.5-lightning
+  output_fidelity: upstage/solar-pro4
