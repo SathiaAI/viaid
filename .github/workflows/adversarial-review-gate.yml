@@ -76,6 +76,12 @@ jobs:
       # Lower-value secret; gitleaks (org-licensed) needs it. The high-value OpenRouter key is an
       # action input, not env. Phase 2 (#61) removes even this from any PR-code-executing job.
       GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+      # Give reasoning-heavy reviewers headroom so a long chain-of-thought does not consume the
+      # completion budget and return empty content (a rare, intermittent panel BLOCK). Keeps
+      # AR_PRIVACY=deny — no data-retention change. Root fix for the empties is the action's
+      # retry/substitution hardening (SathiaAI/adversarial-review PR); this is free insurance.
+      AR_MAX_TOKENS: '16000'
+      AR_REASONING_EFFORT: medium
     steps:
       # Fork PRs get no repo secrets, so the panel cannot run and gitleaks is unlicensed. Fail
       # fast with an honest reason instead of a confusing BLOCKED — a maintainer reviews forks.
