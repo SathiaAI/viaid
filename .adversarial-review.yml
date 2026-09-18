@@ -13,13 +13,19 @@ required_gates:
 # "Deferred-gate waiver not expired" step fails red past 2026-12-31 so it cannot rot silently.
 
 # Reviewer model pins (SAT-1117). The action auto-picks reviewer models from OpenRouter's live
-# catalog with a deterministic picker. For 2 roles that picker lands on a dead slug
-# (openai/gpt-6-astra 404s under SENSITIVE zero-retention + strict-schema routing) and on reasoning
-# models that return empty content on a real diff, and its single substitution stays in the same
-# bad pool -> a deterministic false BLOCKED. These 2 pins force known-good, INDEPENDENT families
-# (each validated directly against the exact strict routing) so the panel completes honestly.
-# Upstream fix tracked so pins become unnecessary: auto-pick liveness check + substitute across the
-# full remaining pool + treat empty content as a failed attempt.
+# catalog with a deterministic picker whose top openai choice (gpt-6-astra) 404s under the
+# SENSITIVE zero-retention + strict-schema routing, and whose single substitution can land on a
+# reasoning model that returns empty content on a real diff -> a nondeterministic false BLOCKED.
+# These 3 pins force known-good, INDEPENDENT families that have each completed on viaid's real diff
+# (or been validated directly against the exact strict routing), so the panel completes honestly:
+#   correctness      z-ai/glm-5.3-flash            (completed the real diff in the first run)
+#   test_quality     nvidia/nemotron-3.5-lightning (completed the real diff once pinned)
+#   output_fidelity  upstage/solar-pro4            (completed the real diff once pinned)
+# The other 3 roles (security=x-ai, data_privacy=google, reliability=mistral) resolve to stable
+# models on every run and are left to auto-pick. Upstream fix tracked so pins become unnecessary:
+# auto-pick liveness check + substitute across the full remaining pool + treat empty content as a
+# failed attempt.
 pins:
+  correctness: z-ai/glm-5.3-flash
   test_quality: nvidia/nemotron-3.5-lightning
   output_fidelity: upstage/solar-pro4
