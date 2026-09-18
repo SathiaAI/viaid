@@ -127,7 +127,7 @@ jobs:
       - name: Install deps (no lifecycle scripts — PR code cannot exfil creds via npm hooks)
         run: npm ci --ignore-scripts
 
-      - uses: SathiaAI/adversarial-review@343861548fbf58fb1d69c521d33ea38d2ea6f00b # v0.2.0
+      - uses: SathiaAI/adversarial-review@c42dfc3a2b924b539cb8d3c5b7d5fee5d5f0c164 # main post-#66: substitution retry-hardening + failed-attempt cost metering (reliable panel)
         id: ar
         with:
           # Deterministic tier from classify (NORMAL is filtered out by the job-level if:).
