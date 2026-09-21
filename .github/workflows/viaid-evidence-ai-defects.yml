@@ -1,0 +1,175 @@
+name: ViaID Evidence — ai-defects (dogfood)
+
+# SAT-1104 — Quiet dogfood of the CURRENT adversarial-review "ai-defects" deeper
+# verifier on ViaID's own PRs.
+#
+# EVIDENCE ONLY. This job records exactly one schema-valid verdict (badge + log)
+# and NEVER blocks a merge. It is a separate concern from the required review gate
+# in adversarial-review-gate.yml — do NOT mark this job "required" in branch
+# protection. Learning failure rates is the goal, not gating.
+#
+# Decisions (Paul, 2026-09-21):
+#   * evidence-only, not required-green
+#   * reuse the CURRENT published action, SHA-pinned (same rev as SAT-1117 / #24)
+#   * risk-classified: deeper verify runs only on non-NORMAL PRs
+#
+# Fail-closed HONESTY (ai-defects TRD §8.6 #3): a missing / incomplete verdict is
+# recorded as BLOCKED — never PASS, never silently skipped. "Fail-closed" here
+# means the recorded EVIDENCE status is honest; it does NOT mean the job blocks
+# the PR.
+#
+# MUST-NOT (TRD §8.6): no third-party scanner brand in name/copy/log; no verifier
+# binary committed; evidence != ship verdict (this never replaces panel/aggregate
+# and posts no product claim); the log/summary carries the verdict + non-secret
+# metadata only.
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  classify:
+    runs-on: ubuntu-latest
+    outputs:
+      tier: ${{ steps.classify.outputs.tier }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - id: classify
+        run: |
+          # Same deterministic path-based tiering as the required gate (SAT-1014).
+          CRITICAL_PATTERNS='^(src/agentid\.mjs|bin/viaid\.mjs)$'
+          NORMAL_PATTERNS='^(test/.*|.*\.md)$'
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "Manual dispatch -> SENSITIVE (no PR diff context)."
+            echo "tier=SENSITIVE" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          CHANGED=$(git diff --name-only "${{ github.event.pull_request.base.sha }}" "${{ github.event.pull_request.head.sha }}")
+          echo "Changed files:"; echo "$CHANGED"
+          TIER="NORMAL"
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            if echo "$f" | grep -qE "$CRITICAL_PATTERNS"; then TIER="CRITICAL"; break
+            elif echo "$f" | grep -qE "$NORMAL_PATTERNS"; then continue
+            else TIER="SENSITIVE"; fi
+          done <<< "$CHANGED"
+          echo "Classified tier: $TIER"
+          echo "tier=$TIER" >> "$GITHUB_OUTPUT"
+
+  evidence:
+    needs: classify
+    # Non-NORMAL only; fork PRs skip cleanly (no secrets -> panel cannot run).
+    if: >-
+      needs.classify.outputs.tier != 'NORMAL' &&
+      !(github.event_name == 'pull_request' && github.event.pull_request.head.repo.fork)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      GITLEAKS_LICENSE: ${{ secrets.GITLEAKS_LICENSE }}
+      AR_MAX_TOKENS: '16000'
+      AR_REASONING_EFFORT: medium
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+
+      - name: Install pinned gate scanners
+        run: |
+          set -euo pipefail
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.28.0/gitleaks_8.28.0_linux_x64.tar.gz \
+            | tar -xz -C /tmp gitleaks
+          sudo install -m 0755 /tmp/gitleaks /usr/local/bin/gitleaks
+          curl -sSfL https://github.com/google/osv-scanner/releases/download/v2.0.2/osv-scanner_linux_amd64 \
+            -o /tmp/osv-scanner
+          sudo install -m 0755 /tmp/osv-scanner /usr/local/bin/osv-scanner
+          python -m pip install --quiet semgrep==1.171.0
+          gitleaks version && osv-scanner --version && semgrep --version
+
+      - name: Install deps (no lifecycle scripts — PR code cannot exfil creds via npm hooks)
+        run: npm ci --ignore-scripts
+
+      # Dogfood the CURRENT published adversarial-review action (same SHA as #24).
+      # EVIDENCE MODE: continue-on-error so a FAIL/BLOCKED verdict never fails the
+      # job. We deliberately do NOT set fail-on here — this job is not a gate.
+      - uses: SathiaAI/adversarial-review@c42dfc3a2b924b539cb8d3c5b7d5fee5d5f0c164 # main post-#66: reliable panel (matches #24 pin)
+        id: ar
+        continue-on-error: true
+        with:
+          risk: ${{ needs.classify.outputs.tier }}
+          dev-providers: anthropic
+          product: viaid
+          gates: |
+            build=npm pack --dry-run
+            unit=node --test
+            secrets=gitleaks detect --no-banner --redact --source . --exit-code 1
+            deps=osv-scanner --lockfile=package-lock.json
+            sast=semgrep scan --config p/default --error
+          openrouter-api-key: ${{ secrets.OPENROUTER_API_KEY }}
+
+      # Record exactly one schema-valid verdict as badge + log. Fail-closed honesty:
+      # if the action produced no recognised verdict, record BLOCKED (never PASS,
+      # never skip). The job still concludes success — evidence-only.
+      - name: Record honest verdict (evidence — badge + log)
+        if: always()
+        run: |
+          set -uo pipefail
+          OUTCOME='${{ steps.ar.outcome }}'
+          VERDICT='${{ steps.ar.outputs.verdict }}'
+          case "$VERDICT" in
+            PASS|FAIL|BLOCKED) RAN=true ;;
+            *) VERDICT=BLOCKED; RAN=false ;;
+          esac
+          BASE='${{ github.event.pull_request.base.sha }}'
+          HEAD='${{ github.event.pull_request.head.sha }}'
+          [ -z "$HEAD" ] && HEAD='${{ github.sha }}'
+          RUN_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          printf '%s\n' \
+            '{' \
+            '  "schema_version": "1.0",' \
+            '  "ticket": "SAT-1104",' \
+            '  "kind": "viaid-evidence-ai-defects",' \
+            "  \"tier\": \"${{ needs.classify.outputs.tier }}\"," \
+            "  \"verdict\": \"$VERDICT\"," \
+            "  \"verifier_ran\": $RAN," \
+            "  \"action_outcome\": \"$OUTCOME\"," \
+            "  \"base_sha\": \"$BASE\"," \
+            "  \"head_sha\": \"$HEAD\"," \
+            "  \"run_url\": \"$RUN_URL\"," \
+            "  \"recorded_at\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"" \
+            '}' > ai-defects-verdict.json
+          # Validate exactly one schema-valid verdict object.
+          jq -e '.verdict|test("^(PASS|FAIL|BLOCKED)$")' ai-defects-verdict.json >/dev/null
+          echo "ai-defects evidence verdict: $VERDICT (ran=$RAN, action_outcome=$OUTCOME)"
+          {
+            echo "### ViaID evidence — ai-defects (SAT-1104, evidence-only)"
+            echo ""
+            echo "| field | value |"
+            echo "|---|---|"
+            echo "| tier | ${{ needs.classify.outputs.tier }} |"
+            echo "| verdict | \`$VERDICT\` |"
+            echo "| verifier ran | $RAN |"
+            echo "| action outcome | $OUTCOME |"
+            echo ""
+            echo "_Evidence only — this check does not block the merge._"
+            echo ""
+            echo '```json'
+            cat ai-defects-verdict.json
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
