@@ -138,10 +138,10 @@ jobs:
           # Real scanner CLIs recorded as gates so the panel transmits and the verdict is real.
           # required_gates (all tiers) = build,unit,secrets,deps,sast — see .adversarial-review.yml.
           gates: |
-            build=npm pack --dry-run
+            build=npm pack --dry-run --ignore-scripts
             unit=node --test
             secrets=gitleaks detect --no-banner --redact --source . --exit-code 1
-            deps=osv-scanner --lockfile=package-lock.json
+            deps=osv-scanner scan --lockfile=package-lock.json
             sast=semgrep scan --config p/default --error
           # Honest posture: FAIL or BLOCKED fails the job. `fail-on: fail` (the hollow-green
           # mechanism) is deliberately NOT used.
