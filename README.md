@@ -3,7 +3,7 @@
 </p>
 
 <h1 align="center">VIA ID</h1>
-<p align="center"><b>Give an AI agent a verifiable identity and a tamper-evident record of what it did.</b></p>
+<p align="center"><b>VIA ID is the security desk for AI agents: signed identity badges and tamper-evident logs anyone can verify.</b></p>
 
 <p align="center">
   <a href="https://www.npmjs.com/package/viaid-skill"><img src="https://img.shields.io/npm/v/viaid-skill?color=FF2079&label=npm" alt="npm version"></a>
@@ -165,3 +165,7 @@ and any open findings are tracked before being claimed as resolved. Feedback and
 ## License
 
 MIT — see `LICENSE`.
+
+---
+
+VIA ID is built and run by [Viaknox](https://viaknox.com/products).
