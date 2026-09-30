@@ -1,0 +1,31 @@
+# Policy as code for viaid's adversarial-review gate (SAT-1117).
+# Explicit per-tier required_gates so the panel's transmit precondition and the machine verdict
+# are deterministic (not left to the action's defaults, which can change on a version bump).
+risk: NORMAL
+dev_providers:
+  - anthropic            # Claude develops viaid, so Claude never reviews it (conflict of interest)
+required_gates:
+  NORMAL:    [build, unit, secrets, deps, sast]
+  SENSITIVE: [build, unit, secrets, deps, sast]
+  CRITICAL:  [build, unit, secrets, deps, sast]
+# mutation testing is DEFERRED (SAT-1008): intentionally omitted from required_gates above and
+# NEVER recorded as a passing gate. It is a visible, time-boxed waiver — the workflow's
+# "Deferred-gate waiver not expired" step fails red past 2026-12-31 so it cannot rot silently.
+
+# Reviewer model pins (SAT-1117). The action auto-picks reviewer models from OpenRouter's live
+# catalog with a deterministic picker whose top openai choice (gpt-6-astra) 404s under the
+# SENSITIVE zero-retention + strict-schema routing, and whose single substitution can land on a
+# reasoning model that returns empty content on a real diff -> a nondeterministic false BLOCKED.
+# These 3 pins force known-good, INDEPENDENT families that have each completed on viaid's real diff
+# (or been validated directly against the exact strict routing), so the panel completes honestly:
+#   correctness      z-ai/glm-5.3-flash            (completed the real diff in the first run)
+#   test_quality     nvidia/nemotron-3.5-lightning (completed the real diff once pinned)
+#   output_fidelity  upstage/solar-pro4            (completed the real diff once pinned)
+# The other 3 roles (security=x-ai, data_privacy=google, reliability=mistral) resolve to stable
+# models on every run and are left to auto-pick. Upstream fix tracked so pins become unnecessary:
+# auto-pick liveness check + substitute across the full remaining pool + treat empty content as a
+# failed attempt.
+pins:
+  correctness: z-ai/glm-5.3-flash
+  test_quality: nvidia/nemotron-3.5-lightning
+  output_fidelity: upstage/solar-pro4
