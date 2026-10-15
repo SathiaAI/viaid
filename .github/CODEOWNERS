@@ -1,0 +1,6 @@
+# Gate-defining files require owner review so a PR cannot silently weaken the security gate
+# (SAT-1117; enforced once branch protection "require review from Code Owners" is on).
+/.github/workflows/adversarial-review-gate.yml   @pjpoulose
+/.github/workflows/ci.yml                         @pjpoulose
+/.adversarial-review.yml                          @pjpoulose
+/.github/CODEOWNERS                               @pjpoulose
