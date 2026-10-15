@@ -164,4 +164,6 @@ and any open findings are tracked before being claimed as resolved. Feedback and
 
 ## License
 
-MIT — see `LICENSE`.
+VIA ID is source-available under the Elastic License 2.0 (ELv2). See `LICENSE`.
+
+All versions up to and including commit `a503c6a089c43def7352a2a7e7e5b26d5c15b367` (the last commit before this change), including the `viaid-skill` 0.1.0 and 0.1.1 npm releases, remain under the MIT License.
